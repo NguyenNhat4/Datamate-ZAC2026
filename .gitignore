@@ -1,0 +1,57 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Local credentials and per-machine agent configuration
+.env
+.env.*
+!.env.example
+/.aws/
+/.codex/
+/.agents/
+
+# Source data: keep datasets out of Git
+/data/
+/train/
+/public_test/
+/private_test/
+
+# Weights, downloaded assets and generated runs
+/models/
+/checkpoints/
+/artifacts/
+/runs/
+/result/
+/results/
+/outputs/
+/work/
+/tmp/
+.cache/
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.ckpt
+
+# Archives and container exports
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+
+# Editor/OS files
+.DS_Store
+Thumbs.db
+*.swp
+*~
