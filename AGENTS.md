@@ -39,7 +39,7 @@ When working against an evaluation profile, its current official requirements ta
 
 ## Evaluation and reporting
 
-- No runner or test commands currently exist. Do not cite commands that have not been implemented.
+- The local runner is documented in `README.md`: `make bench`, `make predict`, `make test`, and `make test-sandbox`. Benchmarks require a provisioned local model server; scripted tests do not establish model quality.
 - Use the applicable profile's metrics and matching rules. Implement PA according to the reference profile when relevant. Distinguish internal evaluators from official evaluators.
 - Run checks appropriate to logic changes and state whether they use synthetic data, training/validation data, or benchmark data. Mock-model checks do not establish real-model quality.
 - Distinguish measurements on team hardware from profile reference limits. Do not claim compliance on unverified hardware.

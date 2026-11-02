@@ -115,6 +115,14 @@ These links are transcribed from the PDF; the archives have not been downloaded 
 
 ## 4. Evaluation
 
+### Local dataset inspection note — 30 October 2026
+
+The local training and public-test packages are now present and their rulebooks have been inspected. The earlier download note describes only the original PDF conversion. A read-only metadata count confirmed 3,000 training questions across 30 businesses; this is not an inference benchmark.
+
+The split rulebooks provide more specific rules than the PDF summary above. In particular, gross profit uses cost recorded on each sales line; do not reconstruct it from purchase lots based only on the general weighted-average-cost description. Money is rounded to whole currency units under the split rulebooks, while percentages and other averages generally use two decimal places unless otherwise specified.
+
+The public-test rulebook also adds definitions absent from training, including customer loyalty by distinct purchase days and primary suppliers by receipt count, plus industry-specific rules. Always load the current split's rules. These observations do not independently verify the latest general regulations or Docker guideline. Architecture alternatives and their trade-offs are documented in [solution-proposal.md](solution-proposal.md).
+
 ### Per-question scoring
 
 Each question is scored correct, wrong, or abstain. An answer is correct only when its `type` equals the reference type and its value satisfies the matching rule. There is no partial credit.
