@@ -154,7 +154,7 @@ def run(args, model_factory=create_model, agent_factory=NativeAgent):
                     predictions.append(row)
                     timings.append(trace["elapsed_seconds"])
                     write_json(logs / f"{index:06d}.json", {"id": question["id"], "final_answer": row, **trace})
-                    write_question_trace(logs / f"{index:06d}.html", question["id"], row, trace)
+                    write_question_trace(logs / f"{index:06d}.html", question["id"], row, trace, question=question)
                     print(f'[{index + 1}/{len(questions)}] {question["id"]}: {answer["type"]} ({timings[-1]:.1f}s)', flush=True)
     except QuestionStopped:
         status = "run_timeout"
@@ -193,6 +193,14 @@ def run(args, model_factory=create_model, agent_factory=NativeAgent):
             report["scoring_error"] = scored.stderr[-2000:]
     write_json(output / "report.json", report)
     write_trace_index(output, predictions)
+    # Render references only after inference, in a separate reporting process.
+    render_command = [sys.executable, "-m", "tabular_agent.trace", str(output)]
+    if args.command == "bench":
+        render_command += ["--references", str(split / "answers.jsonl")]
+    rendered = subprocess.run(render_command, capture_output=True, text=True, timeout=120)
+    if rendered.returncode:
+        report["trace_render_error"] = rendered.stderr[-2000:]
+        write_json(output / "report.json", report)
     print(json.dumps({key: value for key, value in report.items() if key != "questions"}, indent=2))
     print(f"Trace: {output / 'trace.html'}", flush=True)
     return 0 if status == "completed" else 130 if status == "interrupted" else 2

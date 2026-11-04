@@ -28,7 +28,7 @@ class ScriptedModel(Model):
 
 
 def calculation(**changes):
-    record = {"sources": ["F1"], "metric": "sum", "period": None,
+    record = {"sources": ["F1"], "required_columns": {"F1": ["amount"]}, "metric": "sum", "period": None,
               "grain": "line", "unit": "bottles", "rules": ["current rules"],
               "row_count": 1, "checks": {"rows": 1}}
     return {**record, **changes}

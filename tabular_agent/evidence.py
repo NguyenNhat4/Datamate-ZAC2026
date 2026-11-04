@@ -27,6 +27,7 @@ class Period(BaseModel):
 class Calculation(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
     sources: Annotated[list[Text], Field(min_length=1)]
+    required_columns: dict[Text, list[Text]] = Field(default_factory=dict)
     metric: Text
     period: Period | None
     grain: Text
@@ -63,9 +64,21 @@ def validate_candidate(candidate: dict, reads: list[dict]) -> dict:
     if answer["type"] == "unanswerable":
         if not calculation.search_complete or not calculation.missing:
             raise ValueError("unanswerable needs a complete source diagnostic and missing information")
-    elif calculation.period and calculation.row_count:
-        if calculation.date_min is None or calculation.date_max is None:
-            raise ValueError("Dated nonempty calculations require date_min and date_max")
-        if not calculation.period.start <= calculation.date_min <= calculation.date_max <= calculation.period.end:
-            raise ValueError("Reported selected dates must lie within the requested period")
+    else:
+        if calculation.missing:
+            raise ValueError("Required information is missing; a substantive answer is unsupported")
+        if set(calculation.required_columns) != set(calculation.sources):
+            raise ValueError("Declare required_columns for every source before calculating; use [] for a row-count-only input")
+        for source, required in calculation.required_columns.items():
+            available = {column for read in reads if read.get("source") == source
+                         for column in read.get("columns", [])}
+            missing = set(required) - available
+            if missing:
+                raise ValueError(f"Required columns absent from inspected {source}: {sorted(missing)}. "
+                                 "Inspect other relevant sources; use unanswerable only after a complete absence diagnostic.")
+        if calculation.period and calculation.row_count:
+            if calculation.date_min is None or calculation.date_max is None:
+                raise ValueError("Dated nonempty calculations require date_min and date_max")
+            if not calculation.period.start <= calculation.date_min <= calculation.date_max <= calculation.period.end:
+                raise ValueError("Reported selected dates must lie within the requested period")
     return answer

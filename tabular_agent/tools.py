@@ -21,10 +21,28 @@ class DataTools:
         alias, path = self.source(name)
         frame = data_tools.read_table(str(path.relative_to(data_tools.ROOT)), **options)
         self.reads.append({"source": alias, "sheet": options.get("sheet"),
-                           "table": options.get("table"), "rows": len(frame), "full": True})
+                           "table": options.get("table"), "rows": len(frame), "full": True,
+                           "columns": [str(column) for column in frame.columns],
+                           "numeric_columns": options.get("numeric_columns") or []})
         # Retain a bounded audit, including reads from earlier successful actions.
         self.reads = self.reads[-200:]
         return frame
+
+    def read_workbook(self, name, **options):
+        """Read all sheets explicitly, preserving their names beside each row."""
+        import pandas as pd
+        _, path = self.source(name)
+        if path.suffix.lower() != ".xlsx":
+            raise ValueError("read_workbook requires an XLSX file")
+        sheets = self.inspect_table(name)["sheets"]
+        frames = []
+        for sheet in sheets:
+            frame = self.read_table(name, sheet=sheet, **options)
+            if "__sheet" in frame.columns:
+                raise ValueError("Reserved provenance column __sheet already exists")
+            frame["__sheet"] = sheet
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     def inspect_table(self, name, sheet=None, table=None, encoding="utf-8-sig", delimiter=None):
         """Inspect a few raw rows without guessing a header or loading all sheets."""

@@ -31,13 +31,28 @@ from a preview. Resolve relative time using AS_OF_DATE. Read all relevant monthl
 sheets. Preserve sheet/year provenance. Do not confuse line counts with order counts.
 Use the appropriate eligibility rules for the requested metric, explicit join keys,
 and product-specific units. Check dates, coverage, join expansion, and rounding.
+Before arithmetic, identify the actual input columns needed for this metric.
+Gross profit needs sales amounts and recorded sales-line cost under the rulebook;
+quantities and unit conversion factors cannot stand in for either monetary input.
+Missing required information calls for a complete absence diagnostic, not a proxy.
+For last week, compute the Monday of AS_OF_DATE's week, subtract seven days for
+the start, and subtract one day from that Monday for the end. Use all relevant sheets.
 
 Available inside your persistent isolated Python session:
 - inspect_table(name, sheet=None, table=None): bounded raw preview or sheet/table list.
 - read_table(name, sheet=None, table=None, header_row=None, delimiter=None,
-             encoding='utf-8-sig'): full selected table as a pandas DataFrame.
+             encoding='utf-8-sig', numeric_columns=None, decimal_separator=None,
+             thousands_separator=None): full selected table as a pandas DataFrame.
   name may be a file alias such as F1. header_row is zero-based. Choose the header
   explicitly after inspection when ambiguous. pandas itself uses header=.
+- read_workbook(name, **read_options): read ALL XLSX sheets, preserving __sheet.
+  Use this for monthly-sheet workbooks when relevant coverage can span sheets.
+  Parse missing years using each row's __sheet provenance.
+- CSV numbers remain TEXT unless explicitly parsed. Before multiplying, summing,
+  or joining on numeric measures, use numeric_columns=['actual column', ...]
+  with explicit decimal_separator and thousands_separator, or parse_numbers.
+  For example, text '12' * 3 repeats text; it does not calculate 36. Parse both
+  quantities and conversion factors. Keep identifier columns unchanged.
 - table_profile(name, date_column=None, dayfirst=None, year=None, **read_options):
   full row/null counts and optional date coverage, without business filters.
 - parse_numbers(values, decimal_separator='.', thousands_separator=','): explicit
@@ -55,12 +70,16 @@ and earlier candidate answers are discarded. Reload the sources and recompute.
 
 Call final_answer with ONE dict containing a typed answer and calculation record:
 {"type":"number", "answer":30, "calculation":{
- "sources":["F1"], "metric":"net revenue", "period":None,
+ "sources":["F1"], "required_columns":{"F1":["amount"]},
+ "metric":"net revenue", "period":None,
  "grain":"sales line", "unit":"VND", "rules":["current revenue definition"],
  "row_count":2, "checks":{"cancelled_orders_excluded":True}}}
 For a dated nonempty result, period is {"start":"YYYY-MM-DD","end":"YYYY-MM-DD"}
 and calculation also contains date_min/date_max of the selected rows, within that
 period. Provide actual diagnostics, not unsupported claims of correctness.
+required_columns lists the actual columns necessary for the requested metric in
+each source, including monetary inputs for money calculations. Check their presence
+before computing. Do not list a substitute column with a different business meaning.
 Supported types: number, percent, string, date, boolean, list, table, unanswerable,
 abstain. Numbers must be finite JSON numbers; booleans cannot be used as numbers.
 Percent values use percentage units. Dates use YYYY-MM-DD or YYYY-MM. Preserve

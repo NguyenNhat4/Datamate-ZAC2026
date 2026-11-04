@@ -12,7 +12,7 @@ With the already provisioned local model and llama.cpp runtime:
 make demo
 ```
 
-This creates three invented questions over two monthly Excel sheets and a CSV conversion table, starts the local 7B model, runs the native agent, scores against synthetic references in a separate process, and stops the server. It does not run the previous controller. Open the reported `trace.html` to expand each question's code, observations, validation messages, and errors.
+This creates three invented questions over two monthly Excel sheets and a CSV conversion table, starts the local 7B model, runs the native agent, scores against synthetic references in a separate process, and stops the server. It does not run the previous controller. Open the reported `trace.html`, choose a question, and read its expected-versus-actual summary and recommended next step. Expand the raw actions only when you need the code, observations, validation messages, or errors.
 
 Requirements: Linux with working unprivileged user namespaces, `bubblewrap`, `make`, `uv`, Python 3.12, and provisioned weights/runtime. `make setup` installs the locked dependencies in `.venv-native`; installation may require internet. The earlier `.venv` is retained separately. Inference does not install packages or download models.
 
@@ -55,7 +55,7 @@ Each run writes:
 | Artifact | What it tells you |
 | --- | --- |
 | `trace.html` | Click a question, then expand actions and observations in order. No web server or frontend build is needed. |
-| `logs/000000.html` | One expandable question trace. |
+| `logs/000000.html` | Question, expected versus actual answer, observed problems, recommended next step, then expandable events. |
 | `logs/000000.events.jsonl` | Events flushed during the question, including before interruption. |
 | `logs/000000.json` | Completed question trace, final answer, calculation record, and elapsed time. |
 | `submission.jsonl` | Only submission fields; each completed row is flushed and fsynced. |
@@ -83,7 +83,17 @@ Trace artifacts can contain business data and stay in Git-ignored local director
 
 The agent receives the current rulebook, business README, question, `as_of_date`, file map, and bounded previews. It can inspect or read additional sheets. Full source tables stay in the worker. Association IDs are not inserted into the question prompt. Business semantics are selected by the model; readers do not silently select business rules.
 
-Generated code calls `final_answer({...})` with a supported answer type and an internal `calculation` record. The record declares sources, metric, period, grain, unit, rules, selected row count, and checks. Dated nonempty substantive calculations also report selected date bounds. Only source aliases recorded by full `read_table` calls in the current worker session may support a substantive answer. `unanswerable` requires a complete absence diagnostic and a description of missing information; its observed source coverage can lie outside the requested period. `abstain` requires no calculation. These checks detect some mistakes; evidence written by the model is not independent proof of semantic correctness.
+Generated code calls `final_answer({...})` with a supported answer type and an internal `calculation` record. The record declares sources, required input columns per source, metric, period, grain, unit, rules, selected row count, and checks. Substantive answers are rejected when declared columns are absent from the read schemas or required information is explicitly marked missing. Dated nonempty substantive calculations also report selected date bounds. Only source aliases recorded by full `read_table` calls in the current worker session may support a substantive answer. `unanswerable` requires a complete absence diagnostic and a description of missing information; its observed source coverage can lie outside the requested period. `abstain` requires no calculation. These checks detect some mistakes; evidence written by the model is not independent proof of semantic correctness.
+
+CSV fields remain strings by default. Request numeric parsing explicitly, for example `read_table("F1", numeric_columns=["factor"], decimal_separator=".", thousands_separator=",")`. Identifier columns remain unchanged. `read_workbook("F2", header_row=0)` reads every XLSX sheet and adds `__sheet` provenance; inspect differing sheet layouts before choosing this helper.
+
+To refresh an existing report without rerunning inference:
+
+```bash
+.venv-native/bin/python -m tabular_agent.trace runs/your-run --references path/to/training-or-synthetic-answers.jsonl
+```
+
+Use the same references as the saved scoring run. Omit `--references` for prediction-only reports; they do not establish correctness. Reference answers are attached only in the separate post-inference report process.
 
 ## Failure behavior and limits
 
@@ -95,7 +105,7 @@ Context is checked using the local server's chat template and tokenizer when tho
 
 ## Verification boundary
 
-On 3 November 2026, `make test-sandbox` passed all 36 checks, including actual bubblewrap execution and synthetic native-agent recovery. `make check` and shell syntax checks passed. The retained scorer, answer contracts, parser helpers, and partitions match their source-snapshot digests.
+On 3 November 2026, `make test-sandbox` passed all 36 checks, including actual bubblewrap execution and synthetic native-agent recovery. `make check` and shell syntax checks passed. At that checkpoint, the retained scorer, answer contracts, parser helpers, and partitions matched their source-snapshot digests. The following fixes extend the table reader with opt-in numeric parsing.
 
 A real local 7B run on the three invented demo questions completed in 138.124 seconds of CLI time, excluding server startup: 1 correct, 2 wrong, 0 abstentions, 0 invalid outputs; internal PA −0.3333. The quantity answer was `121212.0` instead of `27`, and the agent returned a numeric profit despite absent cost data. The matching product answer also read only one monthly sheet, so it does not demonstrate correct cross-month reasoning. This live semantic acceptance gate remains unmet. The traces show that execution/format checks can pass while the calculation is wrong. These observations are from invented examples, not a representative benchmark or a comparison against the previous controller.
 
@@ -106,3 +116,7 @@ The previous source, untracked source files, tests, locks, and documentation wer
 The scorer and explicit parsing helpers were retained as independent components. The internal scorer is not an official evaluator. Documented matching assumptions remain: numeric tolerance `1e-8`, decimal half-up percent rounding, full-column-name matching before positional fallback, and first/name-column alias interpretation. Scores across changed evaluators are not automatically comparable.
 
 A complete offline Docker package, nested sandbox compatibility in the evaluator image, representative business-level accuracy, reference-hardware throughput, and repeatability remain unverified. Record the exact model revision, source, licence, release date, parameter count, quantization, and runtime build before selecting a submission configuration. The offline reference profile and separate packaging guidance still require confirmation.
+
+On 4 November 2026, all 43 updated checks passed with `make test-sandbox`, including real-worker checks for explicit numeric parsing, unchanged identifiers, declared missing-column rejection, and reading both monthly sheets. `make check` passed. Report content and escaping were checked automatically; visual browser inspection was blocked by the local-file URL policy. These checks do not establish real-model accuracy.
+
+The follow-up live run with the same local model completed in 381.735 seconds of CLI time: 0 correct, 1 wrong, 2 abstentions, 0 invalid outputs (internal PA −0.3333). The quantity result remained `121212.0` instead of `27`; the other questions exhausted their step budgets after execution or calculation-record errors. The added helpers and column checks did not resolve model reliability. Its readable reports are in `runs/demo-output-20261104-165856-950463/`. This is another three-question synthetic observation, not evidence of improved benchmark accuracy.

@@ -14,7 +14,7 @@ from tabular_agent.evidence import validate_candidate
 from tabular_agent.model import LocalCodeModel, local_endpoint
 from tabular_agent.agent import NativeAgent
 from tabular_agent.runtime import Deadline, QuestionStopped, enforce_deadline
-from tabular_agent.trace import write_question_trace
+from tabular_agent.trace import review_summary, write_question_trace
 from native_support import ScriptedModel, calculation, response
 
 
@@ -88,7 +88,7 @@ class NativeLoopGuards(unittest.TestCase):
 
 class EvidenceContracts(unittest.TestCase):
     def setUp(self):
-        self.reads = [{"source": "F1", "full": True, "rows": 1}]
+        self.reads = [{"source": "F1", "full": True, "rows": 1, "columns": ["amount"]}]
 
     def test_strict_answer_types_and_source_evidence(self):
         for kind, value in [("number", 27), ("percent", -12.4), ("string", "Trà"),
@@ -124,8 +124,24 @@ class EvidenceContracts(unittest.TestCase):
         candidate["calculation"]["date_max"] = "2026-03-04"
         with self.assertRaises(ValueError):
             validate_candidate(candidate, self.reads)
+        candidate["calculation"]["date_max"] = "2026-03-01"
         candidate["calculation"]["row_count"] = True
         with self.assertRaises(ValueError):
+            validate_candidate(candidate, self.reads)
+
+    def test_missing_prerequisites_cannot_support_a_substantive_answer(self):
+        candidate = {"type": "number", "answer": 18, "calculation": calculation(
+            metric="profit", required_columns={"F1": ["amount", "cost"]})}
+        with self.assertRaisesRegex(ValueError, "Required columns absent"):
+            validate_candidate(candidate, self.reads)
+        candidate["calculation"]["required_columns"] = {"F1": ["amount"]}
+        candidate["calculation"]["missing"] = "No cost information"
+        with self.assertRaisesRegex(ValueError, "Required information is missing"):
+            validate_candidate(candidate, self.reads)
+
+    def test_every_declared_source_needs_an_input_check(self):
+        candidate = {"type": "number", "answer": 18, "calculation": calculation(required_columns={})}
+        with self.assertRaisesRegex(ValueError, "Declare required_columns"):
             validate_candidate(candidate, self.reads)
 
     def test_loopback_endpoints_only(self):
@@ -143,6 +159,24 @@ class EvidenceContracts(unittest.TestCase):
             self.assertIn("<details>", text)
             self.assertIn("&lt;script&gt;", text)
             self.assertNotIn("<script>", text)
+
+    def test_report_has_actionable_expected_vs_actual_summary(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "trace.html"
+            write_question_trace(path, "example", {"type": "number", "answer": 18}, {"events": []},
+                                 question={"question": "Lãi gộp?", "as_of_date": "2026-03-04"},
+                                 expected={"type": "unanswerable"}, outcome="wrong")
+            text = path.read_text()
+            self.assertIn("Wrong answer", text)
+            self.assertIn("Lãi gộp?", text)
+            self.assertIn("Expected", text)
+            self.assertIn("18 (number)", text)
+            self.assertIn("What to do next", text)
+            self.assertIn("cannot support an answer", text)
+
+    def test_unscored_report_does_not_claim_correctness(self):
+        review = review_summary({"type": "number", "answer": 27}, {"events": []})
+        self.assertEqual(review["status"], "Correctness not evaluated")
 
 
 class ContextCounting(unittest.TestCase):

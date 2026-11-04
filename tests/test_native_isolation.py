@@ -125,6 +125,15 @@ class WorkerIsolation(unittest.TestCase):
         result = self.worker("stock = read_table('stock.sqlite', table='stock')\nprint(int(stock.quantity.sum()))")
         self.assertIn("7", result.logs)
 
+    def test_explicit_numeric_read_preserves_identifiers_and_prevents_repetition(self):
+        (self.business / "factors.csv").write_text('code;factor;price\n0012;12;1.234,50\n')
+        self.worker.cleanup()
+        self.worker = self.new_worker()
+        result = self.worker("df = read_table('factors.csv', header_row=0, numeric_columns=['factor','price'], decimal_separator=',', thousands_separator='.')\nassert df.code.iloc[0] == '0012'\nassert df.factor.iloc[0] * 3 == 36\nprint(df.price.iloc[0])")
+        self.assertIn("1234.50", result.logs)
+        with self.assertRaisesRegex(ValueError, "explicit decimal_separator"):
+            self.worker("read_table('factors.csv', header_row=0, numeric_columns=['factor'])")
+
 
 COMPUTE_QUANTITY = """import pandas as pd
 sales = pd.concat([read_table('F2', sheet=sheet, header_row=0) for sheet in ['2026-02', '2026-03']], ignore_index=True)
@@ -147,6 +156,7 @@ class NativeEndToEnd(unittest.TestCase):
         self.business = create_demo_split(self.split)
         self.record = calculation(
             sources=["F1", "F2"], metric="best selling by base quantity", row_count=2,
+            required_columns={"F1": ["factor"], "F2": ["quantity", "date", "status"]},
             period={"start": "2026-02-23", "end": "2026-03-01"},
             date_min="2026-02-24", date_max="2026-03-01",
             checks={"returned_excluded": True, "cancelled_excluded": True, "sheets_read": 2},
@@ -196,6 +206,29 @@ class NativeEndToEnd(unittest.TestCase):
         self.assertEqual(model.calls, 2)
         self.assertTrue(any(event["stage"] == "worker_reset" for event in trace["events"]))
         self.assertEqual([event["generation"] for event in trace["events"] if event["stage"] == "code"], [1, 2])
+
+    def test_workbook_helper_reads_both_months_and_parses_conversion_factors(self):
+        code = """import pandas as pd
+sales = read_workbook('F2', header_row=0, numeric_columns=['quantity'], decimal_separator='.', thousands_separator='')
+assert set(sales['__sheet']) == {'2026-02','2026-03'}
+conversions = read_table('F1', header_row=0, numeric_columns=['factor'], decimal_separator='.', thousands_separator='')
+selected = sales[sales.status == 'completed'].copy()
+factors = conversions.set_index('product').factor
+selected['bottles'] = selected.quantity * selected['product'].map(factors).where(selected.unit == 'box', 1)
+"""
+        final = "final_answer({'type':'number','answer':int(selected.bottles.sum()),'calculation':" + repr(self.record) + "})"
+        answer, _, _ = self.solve([response(code + final)])
+        self.assertEqual(answer, {"type": "number", "answer": 27})
+
+    def test_missing_cost_columns_reject_profit_and_allow_absence_diagnostic(self):
+        record = calculation(sources=["F2"], metric="profit", unit="VND",
+                             required_columns={"F2": ["amount", "cost"]})
+        invalid = "sales = read_workbook('F2', header_row=0)\nfinal_answer({'type':'number','answer':18,'calculation':" + repr(record) + "})"
+        record.update(search_complete=True, missing="No sales amount or cost fields are recorded")
+        fixed = "final_answer({'type':'unanswerable','reason':'Missing monetary inputs','calculation':" + repr(record) + "})"
+        answer, trace, _ = self.solve([response(invalid), response(fixed)])
+        self.assertEqual(answer["type"], "unanswerable")
+        self.assertTrue(any(event["stage"] == "validation" and not event["accepted"] for event in trace["events"]))
 
     def test_incremental_writes_survive_interruption_and_trace_pages_exist(self):
         output = self.root / "output"

@@ -102,7 +102,7 @@ An empty filtered table does not automatically mean “unanswerable.” First ch
 
 ## Debug one question, from evidence to cause
 
-Start with the saved run's `trace.html`. Click a question, then expand its code and observations. For a deeper inspection, use the artifacts from the [runner](README.md#what-to-inspect-when-debugging).
+Start with the saved run's `trace.html`. Click a question and read Expected, Agent returned, and What to do next. A wrong result needs a calculation or input-selection fix; an abstention needs investigation of its stop reason. An unscored result still needs verification. Then expand the code and observations to find the first incorrect step. For a deeper inspection, use the artifacts from the [runner](README.md#what-to-inspect-when-debugging).
 
 | Open | What to look for |
 | --- | --- |

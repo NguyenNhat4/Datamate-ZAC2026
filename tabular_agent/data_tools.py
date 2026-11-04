@@ -40,8 +40,9 @@ def choose_header(rows):
     return candidates[0]['row']
 
 
-def read_table(filename, sheet=None, table=None, header_row=None, delimiter=None, encoding='utf-8-sig'):
-    """Read one file without changing values; require explicit resolution of ambiguity."""
+def read_table(filename, sheet=None, table=None, header_row=None, delimiter=None, encoding='utf-8-sig',
+               numeric_columns=None, decimal_separator=None, thousands_separator=None):
+    """Read one table, with numeric conversion only for explicitly selected columns."""
     import pandas as pd
     path = source_path(filename)
     suffix = path.suffix.lower()
@@ -65,8 +66,8 @@ def read_table(filename, sheet=None, table=None, header_row=None, delimiter=None
         finally:
             book.close()
         header = choose_header(preview) if header_row is None else header_row
-        return pd.read_excel(path, sheet_name=sheet, header=header, dtype=object)
-    if suffix == '.csv':
+        frame = pd.read_excel(path, sheet_name=sheet, header=header, dtype=object)
+    elif suffix == '.csv':
         if delimiter is not None and (not isinstance(delimiter, str) or len(delimiter) != 1):
             raise ValueError('delimiter must be one character')
         with path.open(encoding=encoding, newline='') as stream:
@@ -83,16 +84,28 @@ def read_table(filename, sheet=None, table=None, header_row=None, delimiter=None
                 if len(rows) >= 8:
                     break
         header = choose_header(rows) if header_row is None else header_row
-        return pd.read_csv(path, sep=delimiter, header=header, encoding=encoding,
-                           dtype=object, skip_blank_lines=False)
-    if suffix in {'.sqlite', '.db', '.sqlite3'}:
+        frame = pd.read_csv(path, sep=delimiter, header=header, encoding=encoding,
+                            dtype=object, skip_blank_lines=False)
+    elif suffix in {'.sqlite', '.db', '.sqlite3'}:
         with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as db:
             names = [x[0] for x in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
             if table not in names:
                 raise ValueError(f'Choose a table from: {names}')
             quoted = '"' + table.replace('"', '""') + '"'
-            return pd.read_sql_query(f'SELECT * FROM {quoted}', db)
-    raise ValueError('Supported table formats are xlsx, csv and sqlite')
+            frame = pd.read_sql_query(f'SELECT * FROM {quoted}', db)
+    else:
+        raise ValueError('Supported table formats are xlsx, csv and sqlite')
+    if numeric_columns is not None:
+        if not isinstance(numeric_columns, list) or not all(isinstance(name, str) for name in numeric_columns):
+            raise ValueError('numeric_columns must be a list of column names')
+        if decimal_separator is None or thousands_separator is None:
+            raise ValueError('Numeric columns require explicit decimal_separator and thousands_separator')
+        for name in numeric_columns:
+            if name not in frame.columns:
+                raise ValueError(f'Missing numeric column: {name}; available columns: {list(frame.columns)}')
+            frame[name] = parse_numbers(frame[name], decimal_separator=decimal_separator,
+                                         thousands_separator=thousands_separator)
+    return frame
 
 
 def parse_numbers(values, *, decimal_separator, thousands_separator):
