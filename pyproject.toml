@@ -1,0 +1,16 @@
+[project]
+name = "tabular-analysis-agent"
+version = "0.1.0"
+description = "Vietnamese tabular analysis with native code actions and isolated execution"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "smolagents[openai]==1.26.0",
+    "pandas==2.3.3",
+    "openpyxl==3.1.5",
+    "pydantic>=2.12,<3",
+    "openai==1.109.1",
+    "httpx==0.28.1",
+]
+
+[tool.uv]
+package = false

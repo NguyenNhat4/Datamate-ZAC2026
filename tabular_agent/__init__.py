@@ -1,1 +1,1 @@
-"""Bounded, local Python analysis agent."""
+"""Native CodeAgent with local inference and isolated Python execution."""

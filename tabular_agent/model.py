@@ -1,78 +1,96 @@
-"""Local-only JSON action transport. No SDK, proxy, redirects, or downloads."""
+"""Native OpenAIModel transport to a provisioned loopback model server."""
 import json
 import os
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
+
+import httpx
+from smolagents import OpenAIModel
+
+from .runtime import QuestionStopped
 
 
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError('Model endpoint redirects are disabled')
+def local_endpoint(url: str) -> str:
+    parsed = urlparse(url)
+    if (parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+            or parsed.username or parsed.password or parsed.query or parsed.fragment):
+        raise ValueError("Use a loopback HTTP model endpoint without URL credentials")
+    return url.rstrip("/")
 
 
-class LocalModel:
-    def __init__(self, backend='ollama', base_url=None, model=None, timeout=120,
-                 seed=42, max_tokens=2048, context=32768):
-        self.backend = backend
-        self.base_url = (base_url or ('http://127.0.0.1:11434' if backend == 'ollama' else 'http://127.0.0.1:8000/v1')).rstrip('/')
-        parsed = urlparse(self.base_url)
-        if (parsed.scheme not in {'http', 'https'} or parsed.hostname not in {'127.0.0.1', 'localhost', '::1'}
-                or parsed.username or parsed.password or parsed.query or parsed.fragment):
-            raise ValueError('Only localhost model endpoints without URL credentials are allowed')
-        self.model, self.timeout, self.seed = model, timeout, seed
-        self.max_tokens, self.context = max_tokens, context
-        self.opener = build_opener(ProxyHandler({}), NoRedirect())
-        self.metadata = {}
+def reject_redirect(response):
+    if response.is_redirect:
+        raise ValueError("Model endpoint redirects are disabled")
 
-    def request(self, path, payload=None, timeout=None):
-        headers = {'Content-Type': 'application/json'}
-        if os.environ.get('LOCAL_MODEL_API_KEY'):
-            headers['Authorization'] = 'Bearer ' + os.environ['LOCAL_MODEL_API_KEY']
-        req = Request(self.base_url + path, data=None if payload is None else json.dumps(payload).encode(), headers=headers)
-        try:
-            with self.opener.open(req, timeout=timeout or self.timeout) as response:
-                raw = response.read(2 * 1024**2 + 1)
-            if len(raw) > 2 * 1024**2:
-                raise RuntimeError('Model response exceeds 2 MiB')
-            return json.loads(raw)
-        except HTTPError as exc:
-            raise RuntimeError(f'Local model HTTP {exc.code}; check model name, context and server configuration') from exc
-        except TimeoutError as exc:
-            raise RuntimeError('Local model generation exceeded the request time budget') from exc
-        except URLError as exc:
-            raise RuntimeError(f'Local model unavailable at {self.base_url}; start your server first') from exc
+
+class LocalCodeModel(OpenAIModel):
+    def __init__(self, model_id, base_url, *, seed=42, max_tokens=2048, context=32768, timeout=120):
+        base_url = local_endpoint(base_url)
+        self.deadline = None
+        self.request_seconds = timeout
+        self.context_capacity = context
+        self.output_tokens = max_tokens
+        self.tokenizer_supported = None
+        self.context_counting = "not yet measured"
+        self.http_client = httpx.Client(trust_env=False, follow_redirects=False,
+                                       timeout=timeout, event_hooks={"response": [reject_redirect]})
+        super().__init__(
+            model_id=model_id, api_base=base_url,
+            api_key=os.environ.get("LOCAL_MODEL_API_KEY") or "local",
+            client_kwargs={"max_retries": 0, "http_client": self.http_client, "timeout": timeout},
+            retry=False, temperature=0, seed=seed, max_tokens=max_tokens,
+        )
+
+    def generate(self, messages, **kwargs):
+        timeout = self.request_seconds
+        if self.deadline is not None:
+            timeout = min(timeout, self.deadline.remaining())
+        completion = self._prepare_completion_kwargs(
+            messages=messages, model=self.model_id, custom_role_conversions=self.custom_role_conversions,
+            convert_images_to_image_urls=True, **kwargs,
+        )
+        input_tokens = self.count_input_tokens(completion["messages"], timeout)
+        if input_tokens + self.output_tokens + 128 > self.context_capacity:
+            raise QuestionStopped("Context budget exhausted; reduce observations or start a larger context")
+        if self.deadline is not None:
+            timeout = min(timeout, self.deadline.remaining())
+        return super().generate(messages, timeout=timeout, **kwargs)
+
+    def count_input_tokens(self, messages, timeout):
+        """Use llama.cpp's actual template/tokenizer when available, without inference."""
+        if self.tokenizer_supported is not False:
+            root = str(self.client.base_url).rstrip("/").removesuffix("/v1")
+            headers = {"Authorization": f"Bearer {self.client.api_key}"}
+            template = self.http_client.post(root + "/apply-template", json={"messages": messages},
+                                             headers=headers, timeout=timeout)
+            if template.status_code in {404, 405}:
+                self.tokenizer_supported = False
+            else:
+                template.raise_for_status()
+                prompt = template.json()["prompt"]
+                tokens = self.http_client.post(root + "/tokenize", json={
+                    "content": prompt, "add_special": True, "parse_special": True,
+                }, headers=headers, timeout=timeout)
+                tokens.raise_for_status()
+                values = tokens.json()["tokens"]
+                if not isinstance(prompt, str) or not isinstance(values, list):
+                    raise ValueError("Invalid model-server tokenization response")
+                self.tokenizer_supported = True
+                self.context_counting = "server chat template and tokenizer"
+                return len(values)
+        # Other compatible servers may not expose tokenization. This conservative
+        # fallback is explicit in run metadata and can abstain earlier than needed.
+        self.context_counting = "conservative UTF-8 bytes (server tokenizer unavailable)"
+        return len(json.dumps(messages, ensure_ascii=False).encode())
 
     def check(self):
-        payload = self.request('/api/tags' if self.backend == 'ollama' else '/models')
-        names = ([x['name'] for x in payload.get('models', [])] if self.backend == 'ollama'
-                 else [x['id'] for x in payload.get('data', [])])
-        if not self.model:
-            if len(names) != 1:
-                raise RuntimeError(f'Set MODEL to an installed model; available: {names}')
-            self.model = names[0]
-        if self.model not in names:
-            raise RuntimeError(f'Model {self.model!r} is not installed/served. Available: {names}')
-        self.metadata = {'backend': self.backend, 'base_url': self.base_url, 'model': self.model,
-                         'seed': self.seed, 'temperature': 0, 'max_tokens': self.max_tokens, 'context': self.context}
-        if self.backend == 'ollama':
-            details = self.request('/api/show', {'model': self.model})
-            self.metadata['details'] = details.get('details', {})
-            self.metadata['model_info'] = details.get('model_info', {})
-            self.metadata['digest'] = next((x.get('digest') for x in payload['models'] if x['name'] == self.model), None)
-        return self.metadata
-
-    def complete(self, messages, timeout=None):
-        common = {'model': self.model, 'messages': messages, 'stream': False}
-        if self.backend == 'ollama':
-            payload = {**common, 'format': 'json', 'options': {'temperature': 0, 'seed': self.seed,
-                       'num_predict': self.max_tokens, 'num_ctx': self.context}}
-            result = self.request('/api/chat', payload, timeout)
-            usage = {k: result.get(k) for k in ('prompt_eval_count', 'eval_count', 'load_duration')}
-            usage['finish_reason'] = result.get('done_reason')
-            return result['message']['content'], usage
-        payload = {**common, 'temperature': 0, 'seed': self.seed, 'max_tokens': self.max_tokens,
-                   'response_format': {'type': 'json_object'}}
-        result = self.request('/chat/completions', payload, timeout)
-        choice = result['choices'][0]
-        return choice['message']['content'], {**result.get('usage', {}), 'finish_reason': choice.get('finish_reason')}
+        available = [model.id for model in self.client.models.list().data]
+        if not self.model_id:
+            if len(available) != 1:
+                raise ValueError(f"Select one served model; available: {available}")
+            self.model_id = available[0]
+        if self.model_id not in available:
+            raise ValueError(f"Model {self.model_id!r} is not served; available: {available}")
+        return {"model": self.model_id, "base_url": str(self.client.base_url),
+                "seed": self.kwargs.get("seed"), "temperature": 0,
+                "max_tokens": self.output_tokens, "context": self.context_capacity,
+                "context_counting": self.context_counting}
