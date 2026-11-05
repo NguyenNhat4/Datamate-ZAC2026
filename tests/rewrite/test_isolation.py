@@ -46,6 +46,23 @@ class IsolatedWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'worker reset'):
             self.worker("df['bad']=1\nraise ValueError('failure')")
         self.assertIn('False', self.worker("print('df' in globals())").logs)
+    def test_error_keeps_prior_output_but_resets_state(self):
+        with self.assertRaisesRegex(ValueError, 'known-column') as error:
+            self.worker("print('known-column')\nvalue=1\nraise ValueError('failure')")
+        self.assertIn('worker reset', str(error.exception))
+        self.assertIn('False', self.worker("print('value' in globals())").logs)
+
+    def test_non_json_final_answer_has_actionable_error(self):
+        with self.assertRaisesRegex(ValueError, 'convert pandas objects'):
+            self.worker("import pandas as pd\nfinal_answer({'type': 'number', 'answer': pd.Series([1])})")
+
+    def test_decimal_final_answer_is_json_serializable(self):
+        result = self.worker("values = parse_numbers(['12', '1.25'], '.', '')\n"
+                             "final_answer({'type': 'list', 'answer': [values.iloc[0], values.iloc[1]]})")
+        self.assertEqual(result.output, {'type': 'list', 'answer': [12, 1.25]})
+        with self.assertRaisesRegex(ValueError, 'without loss'):
+            self.worker("from decimal import Decimal\nfinal_answer({'type':'number', 'answer':Decimal('1.234567890123456789')})")
+
     def test_host_files_not_mounted_and_input_read_only(self):
         result = self.worker("from pathlib import Path\nprint(Path('/secret').exists())")
         self.assertIn('False', result.logs)
@@ -68,7 +85,7 @@ class IsolatedWorkerTests(unittest.TestCase):
 
     def test_memory_records_worker_error_and_next_step_recovers(self):
         events = []
-        model = ScriptedModel(["df=read_table('F1')\nraise ValueError('synthetic failure')",
+        model = ScriptedModel(["df=read_table('F1')\nprint('inspected-column')\nraise ValueError('synthetic failure')",
                                "df=read_table('F1')\nfinal_answer({'type':'number','answer':len(df)})"])
         answer = answer_question(model, {'question': 'Count?', 'as_of_date': '2026-01-01'},
                                  self.business, self.root / 'calendar.csv', 'Count rows.', emit=events.append)
@@ -78,6 +95,7 @@ class IsolatedWorkerTests(unittest.TestCase):
         self.assertIn('synthetic failure', steps[0]['error']['message'])
         self.assertIn('worker reset', steps[0]['error']['message'])
         self.assertIn('synthetic failure', str(steps[1]['model_input_messages']))
+        self.assertIn('inspected-column', str(steps[1]['model_input_messages']))
 
     def test_cli_saves_memory_in_question_log_without_reference_answers(self):
         split = self.root / 'split'

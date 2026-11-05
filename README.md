@@ -27,12 +27,12 @@ For the data contract, answer types and reference evaluation profile, see [proje
 4. Open [the test UI](http://127.0.0.1:8501). Choose a dataset directory, such as `data/train`, and select a **Model provider**:
 
    - **OpenAI API**: add `OPENAI_API_KEY` to your local `.env` file or environment, then choose an OpenAI model. The API is billed and receives the selected question and relevant business context.
-   - **Local server**: start your OpenAI-compatible model server separately, then enter its model name and local endpoint. The UI does not start the model server.
+   - **Local server**: run `make serve-local` in a separate terminal and leave it running. This uses the locally provisioned model and defaults to `local-coder-7b` at `http://127.0.0.1:8000/v1`. Loading can take a while. Use **Check local connection** when it is ready. You may instead use another OpenAI-compatible local server.
 
 5. Choose a **Business**, then select from its questions. To trace the run, check **Send traces to local Phoenix**. Click **Run selected questions**.
 6. Expand the question under **Actions and observations** to inspect its code, results, and agent memory. If tracing is enabled, open [Phoenix](http://127.0.0.1:6006), select the `tabular-agent` project, and open the latest trace.
 
-Press `Ctrl+C` in each terminal to stop the UI and Phoenix. Runs, memory logs, and traces may contain business data and are stored locally in Git-ignored directories.
+Press `Ctrl+C` in each terminal to stop the UI, local model server, and Phoenix. Runs, memory logs, and traces may contain business data and are stored locally in Git-ignored directories.
 
 ## Run locally
 
@@ -98,7 +98,7 @@ Tracing is off by default and exports only to `127.0.0.1:6006`. It can record qu
 - `model.py`: local and OpenAI API `OpenAIModel` configurations.
 - `contracts.py`, `evaluate.py`, and `cli.py`: typed outputs, internal scoring, and the runner.
 
-The rewrite uses the framework's default prompt and tool descriptions. It no longer includes the previous calculation-evidence validator, audit helpers, detailed dashboard, or trace format. Typed output validation and basic isolation tests do not prove answer accuracy, and real-model quality and final deployment compatibility remain to be evaluated.
+The rewrite uses a task-specific system prompt and the framework's tool descriptions. It no longer includes the previous calculation-evidence validator, audit helpers, detailed dashboard, or trace format. Typed output validation and basic isolation tests do not prove answer accuracy, and real-model quality and final deployment compatibility remain to be evaluated.
 
 ## Checks
 

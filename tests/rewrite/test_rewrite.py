@@ -1,5 +1,7 @@
 """Synthetic checks for the rewritten agent; no model service or test answers are used."""
 import json
+import importlib.util
+from decimal import Decimal
 from pathlib import Path
 import tempfile
 import unittest
@@ -31,6 +33,39 @@ class FakeExecutor:
 
 
 class RewriteTests(unittest.TestCase):
+    def test_decimal_encoding_preserves_values_and_rejects_precision_loss(self):
+        spec = importlib.util.spec_from_file_location('worker_for_test', Path(__file__).parents[2] / 'tabular_agent' / 'worker.py')
+        module = importlib.util.module_from_spec(spec)
+        from tabular_agent import tools
+        with patch.dict('sys.modules', {'tools': tools}):
+            spec.loader.exec_module(module)
+        values = tools.parse_numbers.forward(['12', '1.25'], '.', '')
+        encoded = json.dumps({'answer': [values.iloc[0], values.iloc[1]]}, default=module.encode_decimal)
+        self.assertEqual(json.loads(encoded), {'answer': [12, 1.25]})
+        with self.assertRaisesRegex(ValueError, 'without loss'):
+            json.dumps({'answer': Decimal('1.234567890123456789')}, default=module.encode_decimal)
+        with self.assertRaisesRegex(ValueError, 'non-finite'):
+            json.dumps({'answer': Decimal('NaN')}, default=module.encode_decimal)
+
+    def test_exhausted_steps_abstain_without_another_model_call(self):
+        class NonFinalExecutor(FakeExecutor):
+            def __call__(self, code):
+                return CodeOutput(None, '', False)
+
+        class CountingModel(ScriptedModel):
+            calls = 0
+            def generate(self, messages, **kwargs):
+                self.calls += 1
+                return super().generate(messages, **kwargs)
+
+        model = CountingModel()
+        with patch('tabular_agent.agent.IsolatedExecutor', NonFinalExecutor):
+            agent, _ = build_agent(model, None, None, max_steps=1)
+            answer = agent.run('question')
+        self.assertEqual(answer['type'], 'abstain')
+        self.assertIn('step limit', answer['reason'])
+        self.assertEqual(model.calls, 1)
+
     def test_tools_are_registered_and_descriptions_reach_model(self):
         model = ScriptedModel()
         with patch('tabular_agent.agent.IsolatedExecutor', FakeExecutor):
@@ -38,6 +73,8 @@ class RewriteTests(unittest.TestCase):
             self.assertEqual(agent.run('question'), {'type': 'number', 'answer': 2})
         self.assertEqual(set(executor.tools), {tool.name for tool in AGENT_TOOLS} | {'final_answer'})
         text = str(model.messages)
+        self.assertNotIn('0.36', text)
+        self.assertIn('reload data and recompute', text)
         for tool in AGENT_TOOLS:
             self.assertIn(tool.name, text)
             self.assertIn(tool.description, text)

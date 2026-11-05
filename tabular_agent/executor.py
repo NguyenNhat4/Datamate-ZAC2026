@@ -100,7 +100,11 @@ class IsolatedExecutor(PythonExecutor):
             record_tool_calls(response.get('tool_calls', []))
             if response['status'] != 'ok':
                 self.cleanup()
-                raise ValueError(response['error'] + '; worker reset, reload sources and recompute')
+                logs = response.get('logs', '')
+                if logs:
+                    self.emit({'stage': 'observation', 'text': logs})
+                detail = ('\nOutput before error (worker state was discarded):\n' + logs) if logs else ''
+                raise ValueError(response['error'] + '; worker reset, reload sources and recompute' + detail)
             self.emit({'stage': 'observation', 'text': response['logs']})
             return CodeOutput(response['output'], response['logs'], response['final'])
         except BaseException:
