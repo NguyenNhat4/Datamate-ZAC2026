@@ -1,1 +1,1 @@
-"""Native CodeAgent with local inference and isolated Python execution."""
+"""A small smolagents-based tabular question-answering application."""

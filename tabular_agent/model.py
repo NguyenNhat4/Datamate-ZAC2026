@@ -1,96 +1,93 @@
-"""Native OpenAIModel transport to a provisioned loopback model server."""
-import json
+"""Configure local or OpenAI-hosted smolagents models."""
+from urllib.parse import urlsplit
+import ipaddress
 import os
-from urllib.parse import urlparse
-
+from pathlib import Path
+import re
+from dotenv import dotenv_values
 import httpx
 from smolagents import OpenAIModel
 
-from .runtime import QuestionStopped
+DEFAULT_OPENAI_MODEL = 'gpt-6-luna'
 
 
-def local_endpoint(url: str) -> str:
-    parsed = urlparse(url)
-    if (parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
-            or parsed.username or parsed.password or parsed.query or parsed.fragment):
-        raise ValueError("Use a loopback HTTP model endpoint without URL credentials")
-    return url.rstrip("/")
+class LocalModel(OpenAIModel):
+    def generate(self, messages, **kwargs):
+        response = super().generate(messages, **kwargs)
+        raw = response.raw
+        choices = raw.get('choices', []) if isinstance(raw, dict) else getattr(raw, 'choices', [])
+        finish = (choices[0].get('finish_reason') if isinstance(choices[0], dict)
+                  else getattr(choices[0], 'finish_reason', None)) if choices else None
+        if finish != 'stop':
+            raise ValueError(f'Incomplete model response ({finish!r}); generated code was not executed')
+        return response
 
 
-def reject_redirect(response):
-    if response.is_redirect:
-        raise ValueError("Model endpoint redirects are disabled")
-
-
-class LocalCodeModel(OpenAIModel):
-    def __init__(self, model_id, base_url, *, seed=42, max_tokens=2048, context=32768, timeout=120):
-        base_url = local_endpoint(base_url)
-        self.deadline = None
-        self.request_seconds = timeout
-        self.context_capacity = context
-        self.output_tokens = max_tokens
-        self.tokenizer_supported = None
-        self.context_counting = "not yet measured"
-        self.http_client = httpx.Client(trust_env=False, follow_redirects=False,
-                                       timeout=timeout, event_hooks={"response": [reject_redirect]})
-        super().__init__(
-            model_id=model_id, api_base=base_url,
-            api_key=os.environ.get("LOCAL_MODEL_API_KEY") or "local",
-            client_kwargs={"max_retries": 0, "http_client": self.http_client, "timeout": timeout},
-            retry=False, temperature=0, seed=seed, max_tokens=max_tokens,
-        )
+class OpenAIAPIModel(LocalModel):
+    # Avoid sending stop sequences, which are unsupported by some reasoning models.
+    @property
+    def supports_stop_parameter(self):
+        return False
 
     def generate(self, messages, **kwargs):
-        timeout = self.request_seconds
-        if self.deadline is not None:
-            timeout = min(timeout, self.deadline.remaining())
-        completion = self._prepare_completion_kwargs(
-            messages=messages, model=self.model_id, custom_role_conversions=self.custom_role_conversions,
-            convert_images_to_image_urls=True, **kwargs,
-        )
-        input_tokens = self.count_input_tokens(completion["messages"], timeout)
-        if input_tokens + self.output_tokens + 128 > self.context_capacity:
-            raise QuestionStopped("Context budget exhausted; reduce observations or start a larger context")
-        if self.deadline is not None:
-            timeout = min(timeout, self.deadline.remaining())
-        return super().generate(messages, timeout=timeout, **kwargs)
+        try:
+            return super().generate(messages, **kwargs)
+        except Exception as error:
+            message = str(error)
+            key = self.client_kwargs.get('api_key')
+            if key:
+                message = message.replace(key, '[redacted]')
+            message = re.sub(r'sk-[A-Za-z0-9_-]+', '[redacted]', message)
+            raise RuntimeError(f'{type(error).__name__}: {message}') from None
 
-    def count_input_tokens(self, messages, timeout):
-        """Use llama.cpp's actual template/tokenizer when available, without inference."""
-        if self.tokenizer_supported is not False:
-            root = str(self.client.base_url).rstrip("/").removesuffix("/v1")
-            headers = {"Authorization": f"Bearer {self.client.api_key}"}
-            template = self.http_client.post(root + "/apply-template", json={"messages": messages},
-                                             headers=headers, timeout=timeout)
-            if template.status_code in {404, 405}:
-                self.tokenizer_supported = False
-            else:
-                template.raise_for_status()
-                prompt = template.json()["prompt"]
-                tokens = self.http_client.post(root + "/tokenize", json={
-                    "content": prompt, "add_special": True, "parse_special": True,
-                }, headers=headers, timeout=timeout)
-                tokens.raise_for_status()
-                values = tokens.json()["tokens"]
-                if not isinstance(prompt, str) or not isinstance(values, list):
-                    raise ValueError("Invalid model-server tokenization response")
-                self.tokenizer_supported = True
-                self.context_counting = "server chat template and tokenizer"
-                return len(values)
-        # Other compatible servers may not expose tokenization. This conservative
-        # fallback is explicit in run metadata and can abstain earlier than needed.
-        self.context_counting = "conservative UTF-8 bytes (server tokenizer unavailable)"
-        return len(json.dumps(messages, ensure_ascii=False).encode())
 
-    def check(self):
-        available = [model.id for model in self.client.models.list().data]
-        if not self.model_id:
-            if len(available) != 1:
-                raise ValueError(f"Select one served model; available: {available}")
-            self.model_id = available[0]
-        if self.model_id not in available:
-            raise ValueError(f"Model {self.model_id!r} is not served; available: {available}")
-        return {"model": self.model_id, "base_url": str(self.client.base_url),
-                "seed": self.kwargs.get("seed"), "temperature": 0,
-                "max_tokens": self.output_tokens, "context": self.context_capacity,
-                "context_counting": self.context_counting}
+def _setting(name):
+    value = os.environ.get(name)
+    if value:
+        return value.strip()
+    path = Path('.env')
+    return (dotenv_values(path).get(name) or '').strip() if path.is_file() else ''
+
+
+def openai_api_key():
+    """Read the key without displaying it; environment takes priority over .env."""
+    return _setting('OPENAI_API_KEY')
+
+
+def openai_model_name():
+    return _setting('OPENAI_MODEL') or DEFAULT_OPENAI_MODEL
+
+
+def create_model(model_id, base_url, *, max_tokens=2048, timeout=120, seed=42):
+    parsed = urlsplit(base_url)
+    try:
+        local = ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        local = parsed.hostname == 'localhost'
+    if parsed.scheme != 'http' or not local or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError('Inference requires a local HTTP model endpoint')
+    def reject_redirect(response):
+        if response.is_redirect:
+            raise ValueError('Local model redirects are not allowed')
+    client = httpx.Client(timeout=timeout, trust_env=False, follow_redirects=False,
+                          event_hooks={'response': [reject_redirect]})
+    return LocalModel(model_id=model_id, api_base=base_url, api_key='local',
+                       max_tokens=max_tokens, seed=seed, retry=False,
+                       client_kwargs={'http_client': client, 'max_retries': 0})
+
+
+def create_openai_model(model_id, *, max_tokens=2048, timeout=120):
+    """Use the OpenAI API with the key from the environment or local .env."""
+    key = openai_api_key()
+    if not key:
+        raise ValueError('Set OPENAI_API_KEY in the environment or the local .env file')
+
+    def reject_redirect(response):
+        if response.is_redirect:
+            raise ValueError('OpenAI API redirects are not allowed')
+
+    client = httpx.Client(timeout=timeout, trust_env=False, follow_redirects=False,
+                          event_hooks={'response': [reject_redirect]})
+    return OpenAIAPIModel(model_id=model_id, api_base='https://api.openai.com/v1', api_key=key,
+                          max_completion_tokens=max_tokens, store=False, retry=False,
+                          client_kwargs={'http_client': client, 'max_retries': 0})

@@ -43,6 +43,24 @@ class WorkerIsolation(unittest.TestCase):
         self.assertIn("100", result.logs)
         self.assertEqual(self.worker.generation, 1)
 
+    def test_zero_retry_and_worker_filter_evidence(self):
+        (self.business / "sales.csv").write_text(
+            "order,date,status,amount\nA,18/10/2025,done,10\nA,18/10/2025,done,20\n"
+            "B,18/10/2025,cancelled,10\n", encoding="utf-8")
+        record = calculation(required_columns={"F1": ["order", "date", "status"]})
+        zero = {"type": "number", "answer": 0, "calculation": record}
+        result = self.worker("df = read_table('F1', header_row=0)\nfinal_answer(" + repr(zero) + ")")
+        with self.assertRaisesRegex(ValueError, "profile_columns and audit_filter"):
+            self.worker.validate_final(result.output)
+        result = self.worker("print(profile_columns(df, ['date', 'status']))\n"
+                             "selected = audit_date_filter(df, 'date', '2025-10-18', '2025-10-18', dayfirst=True)\n"
+                             "selected = audit_filter(selected, selected.status == 'done', 'eligible')\n"
+                             "count = audit_distinct(selected, 'order')\n"
+                             "final_answer({'type':'number','answer':count,'calculation':" + repr(record) + "})")
+        self.assertEqual(self.worker.validate_final(result.output)["answer"], 1)
+        self.assertEqual([item.get('output_rows') for item in self.worker.diagnostics if item['kind'] in ('filter', 'date_filter')], [3, 2])
+        self.assertEqual(self.worker.diagnostics[-1]['count'], 1)
+
     def test_mutation_exception_discards_state_and_prevents_double_conversion(self):
         self.worker("df = read_table('F1', header_row=0)\ndf.amount = df.amount.astype(int)")
         with self.assertRaisesRegex(ValueError, "Worker reset"):
@@ -205,7 +223,21 @@ class NativeEndToEnd(unittest.TestCase):
         self.assertEqual(answer, {"type": "number", "answer": 27})
         self.assertEqual(model.calls, 2)
         self.assertTrue(any(event["stage"] == "worker_reset" for event in trace["events"]))
+        self.assertIn("Worker reset: all computed variables were lost", model.messages[1])
+        self.assertIn("Reload sources and recompute", model.messages[1])
         self.assertEqual([event["generation"] for event in trace["events"] if event["stage"] == "code"], [1, 2])
+
+    def test_missing_column_feedback_reaches_model_after_isolated_failure(self):
+        invalid = ("read_table('F1', header_row=0, numeric_columns=['missing'], "
+                   "decimal_separator='.', thousands_separator=',')")
+        repaired = "final_answer({'type':'abstain','reason':'fixture'})"
+        answer, trace, model = self.solve([response(invalid), response(repaired)])
+        self.assertEqual(answer["type"], "abstain")
+        self.assertEqual(model.calls, 2)
+        self.assertIn("Numeric column 'missing' not found", model.messages[1])
+        self.assertIn("available columns", model.messages[1])
+        self.assertIn("Reload sources and recompute", model.messages[1])
+        self.assertTrue(any(event["stage"] == "worker_reset" for event in trace["events"]))
 
     def test_workbook_helper_reads_both_months_and_parses_conversion_factors(self):
         code = """import pandas as pd

@@ -144,6 +144,20 @@ class EvidenceContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Declare required_columns"):
             validate_candidate(candidate, self.reads)
 
+    def test_zero_requires_worker_diagnostics_when_source_has_rows(self):
+        candidate = {"type": "number", "answer": 0, "calculation": calculation()}
+        with self.assertRaisesRegex(ValueError, "profile_columns and audit_filter"):
+            validate_candidate(candidate, self.reads)
+        diagnostics = [{"kind": "profile"}, {"kind": "filter", "input_rows": 1, "output_rows": 0}]
+        self.assertEqual(validate_candidate(candidate, self.reads, diagnostics)["answer"], 0)
+        self.assertEqual(validate_candidate(candidate, [{**self.reads[0], "rows": 0}])["answer"], 0)
+        candidate["calculation"]["period"] = {"start": "2025-10-18", "end": "2025-10-18"}
+        candidate["calculation"]["row_count"] = 0
+        with self.assertRaisesRegex(ValueError, "audit_date_filter"):
+            validate_candidate(candidate, self.reads, diagnostics)
+        diagnostics.append({"kind": "date_filter", "start": "2025-10-18", "end": "2025-10-18"})
+        self.assertEqual(validate_candidate(candidate, self.reads, diagnostics)["answer"], 0)
+
     def test_loopback_endpoints_only(self):
         self.assertEqual(local_endpoint("http://127.0.0.1:8000/v1/"), "http://127.0.0.1:8000/v1")
         for url in ("https://example.com/v1", "http://127.0.0.1.evil/v1", "http://key@localhost/v1", "http://localhost/v1?key=secret"):
@@ -182,6 +196,8 @@ class EvidenceContracts(unittest.TestCase):
 class ContextCounting(unittest.TestCase):
     def test_server_token_count_allows_repairs_that_byte_count_would_reject(self):
         model = LocalCodeModel("fixture", "http://127.0.0.1:8000/v1", context=2048, max_tokens=100)
+        events = []
+        model.emit = events.append
         replies = [
             httpx.Response(200, json={"prompt": "formatted chat"}, request=httpx.Request("POST", "http://localhost/apply-template")),
             httpx.Response(200, json={"tokens": list(range(12))}, request=httpx.Request("POST", "http://localhost/tokenize")),
@@ -191,16 +207,43 @@ class ContextCounting(unittest.TestCase):
                 model.generate([{"role": "user", "content": "long Vietnamese context " * 500}])
             generate.assert_called_once()
             self.assertEqual(model.context_counting, "server chat template and tokenizer")
+            self.assertEqual([e["stage"] for e in events], ["model_request", "model_response"])
+            self.assertEqual(events[0]["input_tokens"], 12)
+            self.assertEqual(events[0]["prompt_format"], "full-messages-v1")
+            self.assertIn("long Vietnamese context " * 500, str(events[0]["messages"]))
+            self.assertNotIn("api_key", str(events))
+        finally:
+            model.client.close()
+
+    def test_full_request_record_keeps_all_messages_and_their_endings(self):
+        model = LocalCodeModel("fixture", "http://127.0.0.1:8000/v1", context=32768, max_tokens=100)
+        messages = [{"role": "user" if i % 2 == 0 else "assistant",
+                     "content": f"Message {i} " + "detail " * 100 + f"END-{i}"} for i in range(12)]
+        events = []
+        model.emit = events.append
+        try:
+            with patch.object(model, "count_input_tokens", return_value=1000), patch.object(
+                    OpenAIModel, "generate", return_value=response("pass")):
+                model.generate(messages)
+            recorded = events[0]["messages"]
+            self.assertEqual(len(recorded), 12)
+            for i in range(12):
+                self.assertIn(f"END-{i}", str(recorded[i]))
+            messages[0]["content"] = "changed afterwards"
+            self.assertIn("END-0", str(recorded[0]))
         finally:
             model.client.close()
 
     def test_token_overflow_stops_before_generation(self):
         model = LocalCodeModel("fixture", "http://127.0.0.1:8000/v1", context=2048, max_tokens=100)
+        events = []
+        model.emit = events.append
         try:
             with patch.object(model, "count_input_tokens", return_value=2000), patch.object(OpenAIModel, "generate") as generate:
                 with self.assertRaises(QuestionStopped):
                     model.generate([{"role": "user", "content": "question"}])
             generate.assert_not_called()
+            self.assertEqual(events, [])
         finally:
             model.client.close()
 
