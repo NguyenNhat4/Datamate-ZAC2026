@@ -1,1 +1,1 @@
-"""Bounded, local Python analysis agent."""
+"""A small smolagents-based tabular question-answering application."""

@@ -121,7 +121,7 @@ The local training and public-test packages are now present and their rulebooks 
 
 The split rulebooks provide more specific rules than the PDF summary above. In particular, gross profit uses cost recorded on each sales line; do not reconstruct it from purchase lots based only on the general weighted-average-cost description. Money is rounded to whole currency units under the split rulebooks, while percentages and other averages generally use two decimal places unless otherwise specified.
 
-The public-test rulebook also adds definitions absent from training, including customer loyalty by distinct purchase days and primary suppliers by receipt count, plus industry-specific rules. Always load the current split's rules. These observations do not independently verify the latest general regulations or Docker guideline. Architecture alternatives and their trade-offs are documented in [solution-proposal.md](solution-proposal.md).
+The public-test rulebook also adds definitions absent from training, including customer loyalty by distinct purchase days and primary suppliers by receipt count, plus industry-specific rules. Always load the current split's rules. These observations do not independently verify the latest general regulations or Docker guideline.
 
 ### Per-question scoring
 
