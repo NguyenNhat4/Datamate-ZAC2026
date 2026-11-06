@@ -6,9 +6,11 @@ import subprocess
 import sys
 import tempfile
 
+import httpx
+
 import streamlit as st
 from tabular_agent.contracts import read_jsonl
-from tabular_agent.model import openai_api_key, openai_model_name
+from tabular_agent.model import create_model, openai_api_key, openai_model_name
 
 st.set_page_config(page_title='Agent test lab', page_icon='🔎', layout='wide')
 st.title('Agent test lab')
@@ -25,6 +27,24 @@ if provider == 'OpenAI API':
 else:
     model = st.text_input('Local model name', value='local-coder-7b')
     base_url = st.text_input('Local model endpoint', value='http://127.0.0.1:8000/v1')
+    st.caption('Start an OpenAI-compatible local model server separately and keep it running. The UI does not start it.')
+    if st.button('Check local connection'):
+        try:
+            # Reuse the runner's loopback validation and HTTP client settings.
+            local_model = create_model(model, base_url, timeout=3)
+            try:
+                response = local_model.client.get('/models', cast_to=dict[str, object])
+            finally:
+                local_model.client.close()
+            available = [item.get('id') for item in response.get('data', []) if isinstance(item, dict)] if isinstance(response, dict) else []
+            if available and model not in available:
+                st.warning(f'Server is reachable, but {model!r} was not in its model list: {available}')
+            else:
+                st.success('Local server is reachable.' + (' The model name is available.' if available else ' Check that the model name matches the server.'))
+        except (ValueError, httpx.HTTPError) as error:
+            st.error(f'Cannot check local server: {error}')
+        except Exception as error:
+            st.error(f'Cannot check local server: {type(error).__name__}: {error}')
 telemetry = st.checkbox('Send traces to local Phoenix', value=False,
                         help='Start Phoenix first with make telemetry; traces can include business data.')
 if telemetry:

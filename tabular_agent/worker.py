@@ -1,7 +1,9 @@
 """Run generated Python in a persistent, operating-system-isolated process."""
 import contextlib
+from decimal import Decimal
 import io
 import json
+import math
 import os
 import resource
 import sys
@@ -15,6 +17,19 @@ from tools import AGENT_TOOLS
 class FinalAnswer(BaseException):
     def __init__(self, value):
         self.value = value
+
+
+def encode_decimal(value):
+    if not isinstance(value, Decimal):
+        raise TypeError(f'Object of type {type(value).__name__} is not JSON serializable')
+    if not value.is_finite():
+        raise ValueError('Final answer cannot contain non-finite numbers')
+    if value == value.to_integral_value():
+        return int(value)
+    number = float(value)
+    if not math.isfinite(number) or Decimal(str(number)) != value:
+        raise ValueError('Decimal cannot be represented without loss as a JSON number; round explicitly')
+    return number
 
 
 def final_answer(value):
@@ -77,6 +92,7 @@ def main():
     scope.update({'__name__': '__main__', 'final_answer': final_answer})
     protocol.write('{"status":"ready"}\n')
     for line in sys.stdin:
+        logs = None
         try:
             request = json.loads(line)
             calls.clear()
@@ -92,11 +108,17 @@ def main():
                 result, final = answer.value, True
             response = {'status': 'ok', 'logs': logs.getvalue()[:8000], 'output': result, 'final': final,
                         'tool_calls': calls}
-            encoded = json.dumps(response, ensure_ascii=False, allow_nan=False)
+            try:
+                encoded = json.dumps(response, ensure_ascii=False, allow_nan=False, default=encode_decimal)
+            except TypeError as error:
+                if final:
+                    raise ValueError(f'Final answer must contain JSON values; convert pandas objects to scalar numbers or lists: {error}') from error
+                raise
             if len(encoded.encode()) > 65535:
                 raise ValueError('Output too large; print a smaller summary')
         except BaseException as error:
             encoded = json.dumps({'status': 'error', 'error': f'{type(error).__name__}: {error}',
+                                  'logs': logs.getvalue()[:8000] if logs is not None else '',
                                   'tool_calls': calls}, ensure_ascii=False)
         protocol.write(encoded + '\n')
 

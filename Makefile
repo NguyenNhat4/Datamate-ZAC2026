@@ -8,9 +8,10 @@ SEED ?= 42
 OUT ?=
 ARGS ?=
 
-.PHONY: help setup ui telemetry bench bench-local demo predict doctor test test-sandbox check
+.PHONY: help setup ui serve-local telemetry bench bench-local demo predict doctor test test-sandbox check
 help:
 	@echo 'make ui                           Open the local question picker and visual test results'
+	@echo 'make serve-local                  Start the local model server for the UI'
 	@echo 'make telemetry                    Start local Phoenix for agent trace inspection'
 	@echo 'make demo                         Run the new agent on invented cross-month sales data'
 	@echo 'make bench-local LIMIT=5           Start the provisioned local model and benchmark'
@@ -26,6 +27,8 @@ help:
 setup: .venv-native/.ready
 ui: setup
 	$(PYTHON) -m streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true --browser.gatherUsageStats false
+serve-local:
+	./scripts/serve-local.sh
 telemetry: setup
 	mkdir -p .cache/phoenix
 	env PHOENIX_WORKING_DIR=$(CURDIR)/.cache/phoenix $(PYTHON) -m tabular_agent.phoenix_local serve
