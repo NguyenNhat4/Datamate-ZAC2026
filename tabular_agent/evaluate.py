@@ -98,4 +98,6 @@ def score(questions, predictions, references):
     correct = sum(item['outcome'] == 'correct' for item in outcomes)
     wrong = sum(item['outcome'] == 'wrong' for item in outcomes)
     return {'evaluator': 'internal-not-official', 'total': total, 'correct': correct, 'wrong': wrong, 'abstain': total - correct - wrong,
-            'penalized_accuracy': (correct - wrong) / total if total else 0, 'questions': outcomes}
+            'penalized_accuracy': (correct - wrong) / total if total else 0,
+            'coverage': (correct + wrong) / total if total else 0,
+            'answered_accuracy': correct / (correct + wrong) if correct + wrong else None, 'questions': outcomes}

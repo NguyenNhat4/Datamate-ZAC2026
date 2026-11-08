@@ -106,6 +106,13 @@ def show_run():
         for row in read_jsonl(results):
             st.subheader(lookup.get(row['id'], {}).get('question', row['id']))
             st.json(row)
+            timing_file = path / 'timings.json'
+            if timing_file.exists():
+                measurements = next((item for item in json.loads(timing_file.read_text(encoding='utf-8'))
+                                     if item['id'] == row['id']), None)
+                if measurements:
+                    st.caption(f"{measurements['seconds']:.2f}s · {measurements['model_calls']} model calls · "
+                               f"{measurements['retries']} retries")
     report = path / 'score.json'
     if report.exists():
         st.subheader('Internal score')
@@ -129,25 +136,18 @@ def show_run():
                     if item.get('stage') == 'code':
                         st.code(item['code'], language='python')
                     elif item.get('stage') == 'memory_step':
-                        st.markdown(f"**{item.get('phase', 'agent').title()} · step {item['step']}**")
+                        st.markdown(f"**Agent · step {item['step']}**")
                         if item.get('token_usage'):
                             st.caption(f"Reported model token usage: {item['token_usage']}")
                         if item.get('model_output'):
                             st.text(item['model_output'])
                         if item.get('tool_calls'):
-                            st.caption('Tool and managed-agent calls')
+                            st.caption('Tool calls')
                             st.json(item['tool_calls'])
                         if item.get('error'):
                             st.error(str(item['error']))
                         st.caption('Messages in smolagents memory before this step')
                         st.json(item.get('model_input_messages') or [], expanded=False)
-                    elif item.get('stage') == 'verification':
-                        st.write('Agent review:', item.get('outcome'))
-                        if 'initial' in item:
-                            results = {'solver': item['initial'], 'reviewer': item['independent']}
-                            if 'adjudicator' in item:
-                                results['adjudicator'] = item['adjudicator']
-                            st.json(results)
                     else:
                         st.text(item.get('text', ''))
 

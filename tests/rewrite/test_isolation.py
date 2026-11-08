@@ -8,8 +8,8 @@ import unittest
 from unittest.mock import patch
 
 from smolagents import Model
-from smolagents.models import ChatMessage, MessageRole, ChatMessageToolCall, ChatMessageToolCallFunction
-from tabular_agent.agent import answer_question, answer_with_verification, source_preview
+from smolagents.models import ChatMessage, MessageRole
+from tabular_agent.agent import answer_question, source_preview
 from tabular_agent.cli import parser, run
 from tabular_agent.executor import IsolatedExecutor
 from tabular_agent.telemetry import tracing
@@ -24,21 +24,6 @@ class ScriptedModel(Model):
         if isinstance(action, Exception):
             raise action
         return ChatMessage(role=MessageRole.ASSISTANT, content='Thought: calculate.\n<code>\n' + action + '\n</code>')
-
-
-class ManagedScriptedModel(ScriptedModel):
-    def __init__(self, actions, manager_calls):
-        super().__init__(actions)
-        self.manager_calls = iter(manager_calls)
-        self.requests = []
-    def generate(self, messages, **kwargs):
-        self.requests.append(str(messages))
-        if kwargs.get('tools_to_call_from') is not None:
-            name, args = next(self.manager_calls)
-            call = ChatMessageToolCall(function=ChatMessageToolCallFunction(name=name, arguments=args),
-                                       id=f'call_{len(self.requests)}', type='function')
-            return ChatMessage(role=MessageRole.ASSISTANT, tool_calls=[call])
-        return super().generate(messages, **kwargs)
 
 
 @unittest.skipUnless(os.getenv('RUN_SANDBOX_TESTS') == '1', 'requires bubblewrap namespaces')
@@ -60,6 +45,40 @@ class IsolatedWorkerTests(unittest.TestCase):
         output = self.worker("final_answer({'type':'number', 'answer':len(df)})")
         self.assertEqual(output.output['answer'], 2)
 
+    def test_as_of_date_is_available_after_worker_reset(self):
+        worker = IsolatedExecutor(self.business, self.root / 'calendar.csv', as_of_date='2026-01-02')
+        try:
+            self.assertIn('2026-01-02', worker('print(as_of_date)').logs)
+            with self.assertRaises(ValueError):
+                worker("raise ValueError('reset')")
+            self.assertIn('2026-01-02', worker('print(as_of_date)').logs)
+        finally:
+            worker.cleanup()
+
+    def test_iso_date_variable_does_not_silently_mismatch_day_first_strings(self):
+        code = ("dates=pd.Series(['18/10/2025','19/10/2025'])\n"
+                "today='2025-10-18'\nprint(dates == today)")
+        with self.assertRaisesRegex(ValueError, 'day/month/year text'):
+            self.worker(code)
+
+    def test_python_date_does_not_silently_mismatch_timestamps(self):
+        code = ("dates=pd.to_datetime(pd.Series(['2025-10-18']))\n"
+                "today=datetime.date(2025,10,18)\nprint(dates == today)")
+        with self.assertRaisesRegex(ValueError, 'Date types do not match'):
+            self.worker(code)
+
+    def test_timestamp_does_not_silently_mismatch_python_date_series(self):
+        code = ("dates=pd.to_datetime(pd.Series(['2025-10-18'])).dt.date\n"
+                "today=pd.Timestamp('2025-10-18')\nprint(dates == today)")
+        with self.assertRaisesRegex(ValueError, 'Date types do not match'):
+            self.worker(code)
+
+    def test_datetime_available_after_worker_reset(self):
+        self.assertIn('2025-10-18', self.worker("print(datetime.datetime.strptime('2025-10-18', '%Y-%m-%d').date())").logs)
+        with self.assertRaises(ValueError):
+            self.worker("raise ValueError('reset')")
+        self.assertIn('2025-10-18', self.worker("print(datetime.date(2025, 10, 18))").logs)
+
     def test_bare_inspection_results_reach_agent(self):
         self.assertIn('sales.csv', self.worker('list_files()').logs)
         self.assertIn('amount', self.worker("inspect_table('F1')").logs)
@@ -69,6 +88,12 @@ class IsolatedWorkerTests(unittest.TestCase):
         self.assertIn('sales.csv', preview)
         self.assertIn('amount', preview)
         self.assertNotIn('secret', preview)
+
+    def test_extended_preview_can_show_nonfirst_header(self):
+        (self.business / 'sales.csv').write_text('Report,\nitem,amount\nA,12\n')
+        preview = source_preview(self.business, self.root / 'calendar.csv', 30, preview_rows=4)
+        self.assertIn('first_rows_only', preview)
+        self.assertIn('amount', preview)
 
     def test_full_read_reports_observed_categories_and_missing_values(self):
         (self.business / 'sales.csv').write_text('order,status\nA,complete\nA,complete\nB,cancelled\nC,\n')
@@ -162,44 +187,38 @@ class IsolatedWorkerTests(unittest.TestCase):
                                  self.root / 'calendar.csv', 'Count rows.')
         self.assertEqual(answer, {'type':'number','answer':2})
 
-    def test_disagreement_hands_work_to_fresh_adjudicator(self):
-        model = ManagedScriptedModel(["final_answer({'type':'number','answer':2})",
-                                      "final_answer({'type':'number','answer':3})",
-                                      "final_answer({'type':'number','answer':3})"],
-                                     [('solver', {'task': 'Solve'}), ('reviewer', {'task': 'Review'}),
-                                      ('adjudicator', {'task': 'Resolve'}),
-                                      ('final_answer', {'answer': {'type': 'number', 'answer': 3}})])
-        events = []
-        answer = answer_with_verification(model, {'question': 'Synthetic question', 'as_of_date': '2026-01-01'},
-                                          self.business, self.root / 'calendar.csv', 'Synthetic rules', emit=events.append)
-        self.assertEqual(answer, {'type': 'number', 'answer': 3})
-        self.assertTrue(any('prior_agent_work' in request and 'solver' in request for request in model.requests))
-        self.assertTrue(any('prior_agent_work' in request and 'reviewer' in request for request in model.requests))
-        self.assertEqual([e['phase'] for e in events if e['stage'] == 'memory_step'],
-                         ['solver', 'manager', 'reviewer', 'manager', 'adjudicator', 'manager'])
+    def test_table_cache_returns_independent_copies(self):
+        self.worker("a=read_table('F1')\na.iloc[0, 0] = 'changed'\nb=read_table('F1')\nprint(b.iloc[0, 0])")
+        output = self.worker("print(b.iloc[0, 0] != 'changed')")
+        self.assertIn('True', output.logs)
 
-    def test_manager_cannot_submit_unsupported_answer(self):
-        model = ManagedScriptedModel(["final_answer({'type':'number','answer':2})",
-                                      "final_answer({'type':'number','answer':3})"],
-                                     [('solver', {'task': 'Solve'}), ('reviewer', {'task': 'Review'}),
-                                      ('final_answer', {'answer': {'type': 'number', 'answer': 99}}),
-                                      ('final_answer', {'answer': {'type': 'abstain'}})])
-        events = []
-        result = answer_with_verification(model, {'question': 'Synthetic', 'as_of_date': '2026-01-01'},
-                                          self.business, self.root / 'calendar.csv', 'Rules', emit=events.append)
-        self.assertEqual(result['type'], 'abstain')
-        self.assertTrue(any('two managed agents' in str(e.get('error')) for e in events))
+    def test_order_count_warns_about_cancelled_status_in_worker(self):
+        code = ("frame=pd.DataFrame({'Mã đơn hàng':['a','b'], "
+                "'Trạng thái đơn hàng':['Đã hoàn thành','Đã hủy']})\n"
+                "print(count_entities(frame, 'Mã đơn hàng'))")
+        with self.assertRaisesRegex(ValueError, 'Order statuses include'):
+            self.worker(code)
 
-    def test_failed_solver_can_be_followed_by_reviewer_and_adjudicator(self):
-        model = ManagedScriptedModel([RuntimeError('synthetic model failure'),
-                                      "final_answer({'type':'number','answer':2})",
-                                      "final_answer({'type':'number','answer':2})"],
-                                     [('solver', {'task': 'Solve'}), ('reviewer', {'task': 'Review'}),
-                                      ('adjudicator', {'task': 'Resolve'}),
-                                      ('final_answer', {'answer': {'type': 'number', 'answer': 2}})])
-        result = answer_with_verification(model, {'question': 'Synthetic', 'as_of_date': '2026-01-01'},
-                                          self.business, self.root / 'calendar.csv', 'Rules')
-        self.assertEqual(result, {'type': 'number', 'answer': 2})
+    def test_nunique_on_order_id_checks_selected_statuses(self):
+        code = ("orders=pd.DataFrame({'Mã đơn hàng':['a','b'], "
+                "'Trạng thái đơn hàng':['Đã hoàn thành','Đã hủy']})\n"
+                "today_orders=orders.copy()\n"
+                "print(today_orders['Mã đơn hàng'].nunique())")
+        with self.assertRaisesRegex(ValueError, 'Order statuses include'):
+            self.worker(code)
+        good = ("orders=pd.DataFrame({'Mã đơn hàng':['a','b'], "
+                "'Trạng thái đơn hàng':['Đã hoàn thành','Đã hủy']})\n"
+                "selected=orders[orders['Trạng thái đơn hàng']=='Đã hoàn thành']\n"
+                "print(selected['Mã đơn hàng'].nunique())")
+        self.assertIn('1', self.worker(good).logs)
+
+    def test_order_count_helper_in_worker_respects_eligibility(self):
+        code = ("frame=pd.DataFrame({'order':['a','a','b'], 'date':['18/10/2025']*3, "
+                "'status':['Đã hoàn thành','Đã hoàn thành','Đã hủy']})\n"
+                "print(count_orders(frame, 'order', 'date', 'status', '2025-10-18', '2025-10-18', "
+                "'%d/%m/%Y', True))")
+        self.assertIn('distinct included=1', self.worker(code).logs)
+
 
     def test_memory_records_worker_error_and_next_step_recovers(self):
         events = []
@@ -228,14 +247,12 @@ class IsolatedWorkerTests(unittest.TestCase):
         (split / 'answers.jsonl').write_text('{"id":"q1","type":"string","answer":"reference-secret"}\n')
         output = self.root / 'output'
         args = parser().parse_args(['predict', '--split', str(split), '--output', str(output), '--model', 'fake'])
-        model = ManagedScriptedModel(["df=read_table('F1')\nprint(len(df))", "final_answer({'type':'number','answer':len(df)})"] * 2,
-                                     [('solver', {'task': 'Solve'}), ('reviewer', {'task': 'Review'}),
-                                      ('final_answer', {'answer': {'type': 'number', 'answer': 2}})])
+        model = ScriptedModel(["df=read_table('F1')\nprint(len(df))", "final_answer({'type':'number','answer':len(df)})"])
         with patch('tabular_agent.cli.create_model', return_value=model):
             self.assertEqual(run(args), 0)
         text = (output / 'logs' / '000000.jsonl').read_text()
         steps = [json.loads(line) for line in text.splitlines() if json.loads(line)['stage'] == 'memory_step']
-        self.assertEqual([step['phase'] for step in steps], ['solver', 'solver', 'manager', 'reviewer', 'reviewer', 'manager'])
+        self.assertEqual([step['step'] for step in steps], [1, 2])
         self.assertIn('Count rows', json.dumps(steps[0]['model_input_messages']))
         self.assertNotIn('reference-secret', text)
 

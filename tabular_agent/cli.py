@@ -2,6 +2,7 @@
 import argparse
 from contextlib import contextmanager
 from datetime import date, datetime
+from importlib.metadata import PackageNotFoundError, version
 import json
 import math
 import os
@@ -9,10 +10,11 @@ from pathlib import Path
 import random
 import re
 import signal
+import subprocess
 import sys
 import time
 
-from .agent import answer_with_verification
+from .agent import answer_question, source_preview
 from .contracts import read_jsonl
 from .evaluate import score
 from .model import create_model, create_openai_model, openai_model_name
@@ -52,9 +54,9 @@ def parser():
         command.add_argument('--seed', type=int, default=42)
         command.add_argument('--business')
         command.add_argument('--question-id', action='append', default=[])
-        command.add_argument('--max-steps', type=int, default=12)
+        command.add_argument('--max-steps', type=int, default=4)
         command.add_argument('--max-tokens', type=int, default=2048)
-        command.add_argument('--question-timeout', type=float, default=360)
+        command.add_argument('--question-timeout', type=float, default=60)
         command.add_argument('--exec-timeout', type=float, default=30)
         command.add_argument('--model-timeout', type=float, default=120)
         command.add_argument('--telemetry', action='store_true', help='Send traces to local Phoenix on port 6006')
@@ -148,8 +150,30 @@ def run(args):
         raise ValueError('Output directory must be empty')
     (output / 'logs').mkdir()
     (output / 'questions.jsonl').write_text(''.join(json.dumps(q, ensure_ascii=False) + '\n' for q in questions), encoding='utf-8')
+    try:
+        revision = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
+        dirty = bool(subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True, check=True).stdout)
+    except (OSError, subprocess.SubprocessError):
+        revision = None
+        dirty = None
+    dependencies = {}
+    for name in ('smolagents', 'pandas', 'openpyxl', 'openai', 'httpx'):
+        try:
+            dependencies[name] = version(name)
+        except PackageNotFoundError:
+            dependencies[name] = None
+    manifest = {'revision': revision, 'python': sys.version.split()[0], 'model': model_name if args.provider == 'openai' else local_name,
+                'dirty': dirty, 'dependencies': dependencies, 'provider': args.provider,
+                'base_url': base if args.provider == 'local' else None, 'agent_mode': 'single', 'seed': args.seed,
+                'partition': args.partition, 'partition_seed': args.partition_seed, 'sample': args.sample,
+                'max_steps': args.max_steps, 'max_tokens': args.max_tokens, 'question_timeout': args.question_timeout,
+                'weight_sha256': args.weight_sha256, 'gpu_layers': args.gpu_layers, 'context': args.context,
+                'cache_type_k': args.cache_type_k, 'cache_type_v': args.cache_type_v}
+    (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     rulebook = (split / 'rulebook.md').read_text(encoding='utf-8')
     predictions = []
+    timings = []
+    previews = {}
     stop_at = time.monotonic() + args.run_timeout
     with (output / 'submission.jsonl').open('w', encoding='utf-8') as submission:
         for index, question in enumerate(questions):
@@ -161,17 +185,74 @@ def run(args):
             if not business.is_dir() or business.is_symlink() or any(p.is_symlink() or p.name == 'answers.jsonl' for p in business.rglob('*')):
                 raise ValueError('Unsafe or missing business directory')
             with (output / 'logs' / f'{index:06}.jsonl').open('w', encoding='utf-8') as events:
+                started = time.monotonic()
+                measurements = {'model_calls': 0, 'model_seconds': 0.0, 'worker_start_seconds': 0.0,
+                                'execution_seconds': 0.0, 'file_read_seconds': 0.0, 'cache_hits': 0,
+                                'errors': [], 'input_tokens': 0, 'output_tokens': 0, 'retries': 0}
+                pending_repair = [False]
                 def emit(event):
+                    if event.get('stage') == 'timing':
+                        operation = event.get('operation')
+                        if operation in ('worker_start', 'execution'):
+                            measurements[operation + '_seconds'] += event.get('seconds', 0)
+                        for tool in event.get('tools', []):
+                            if tool.get('tool') in ('read_table', 'read_workbook'):
+                                measurements['file_read_seconds'] += tool.get('seconds', 0)
+                                measurements['cache_hits'] += int(tool.get('cache_hit', False))
+                    if event.get('stage') == 'memory_step':
+                        if event.get('error'):
+                            measurements['errors'].append(event['error'].get('type', 'error'))
+                            pending_repair[0] = True
+                        usage = event.get('token_usage') or {}
+                        for key in ('input_tokens', 'output_tokens'):
+                            measurements[key] += usage.get(key) or 0
                     events.write(json.dumps(event, ensure_ascii=False) + '\n')
                     events.flush()
+                original_generate = getattr(model, 'generate', None)
+                def timed_generate(*call_args, **call_kwargs):
+                    model_start = time.monotonic()
+                    if pending_repair[0]:
+                        measurements['retries'] += 1
+                        pending_repair[0] = False
+                    measurements['model_calls'] += 1
+                    try:
+                        return original_generate(*call_args, **call_kwargs)
+                    except Exception as error:
+                        cause = error.__cause__
+                        measurements['errors'].append(type(cause or error).__name__)
+                        raise
+                    finally:
+                        measurements['model_seconds'] += time.monotonic() - model_start
+                if original_generate is not None:
+                    model.generate = timed_generate
                 try:
-                    with time_limit(min(args.question_timeout, remaining)):
-                        answer = answer_with_verification(model, question, business, split / 'calendar.csv', rulebook,
-                                                 max_steps=args.max_steps, action_seconds=args.exec_timeout, emit=emit)
+                    budget = min(args.question_timeout, remaining, 60)
+                    with time_limit(budget):
+                        preview_start = time.monotonic()
+                        files = sorted(p for p in business.rglob('*') if p.is_file())
+                        cache_key = (str(business), tuple((str(p.relative_to(business)), p.stat().st_size,
+                                                           p.stat().st_mtime_ns) for p in files))
+                        cache_hit = cache_key in previews
+                        if not cache_hit:
+                            previews[cache_key] = source_preview(business, split / 'calendar.csv', min(args.exec_timeout, budget), preview_rows=4)
+                        measurements['preview_seconds'] = time.monotonic() - preview_start
+                        measurements['preview_cache_hit'] = cache_hit
+                        emit({'stage': 'source_preview', 'text': previews[cache_key]})
+                        answer = answer_question(model, question, business, split / 'calendar.csv', rulebook,
+                                                 max_steps=min(args.max_steps, 4),
+                                                 action_seconds=min(args.exec_timeout, budget), emit=emit,
+                                                 source_summary=previews[cache_key])
                 except QuestionDeadlineExceeded:
                     answer = {'type': 'abstain', 'reason': 'Question deadline exceeded'}
                 except Exception as error:
                     answer = {'type': 'abstain', 'reason': f'{type(error).__name__}: {error}'}
+                finally:
+                    if original_generate is not None:
+                        model.generate = original_generate
+                measurements.update({'id': question['id'], 'seconds': time.monotonic() - started,
+                                     'answer_type': answer['type']})
+                timings.append(measurements)
+                emit({'stage': 'question_timing', **measurements})
             row = {'id': question['id'], **answer}
             predictions.append(row)
             submission.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + '\n')
@@ -181,6 +262,18 @@ def run(args):
     if args.command == 'bench':
         report = score(questions, predictions, read_jsonl(split / 'answers.jsonl'))
         (output / 'score.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    (output / 'timings.json').write_text(json.dumps(timings, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    if timings:
+        durations = sorted(item['seconds'] for item in timings)
+        def percentile(p):
+            return durations[max(0, math.ceil(p * len(durations)) - 1)]
+        answered = [item for item in timings if item['answer_type'] != 'abstain']
+        abstained = [item for item in timings if item['answer_type'] == 'abstain']
+        summary = {'count': len(timings), 'p50_seconds': percentile(.50), 'p90_seconds': percentile(.90),
+                   'p95_seconds': percentile(.95), 'under_10_seconds': sum(x < 10 for x in durations) / len(durations),
+                   'answered_under_10_seconds': sum(x['seconds'] < 10 for x in answered) / len(answered) if answered else None,
+                   'abstained_under_10_seconds': sum(x['seconds'] < 10 for x in abstained) / len(abstained) if abstained else None}
+        (output / 'timing-summary.json').write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
     print('Results:', output)
     return 0
 

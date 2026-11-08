@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from tabular_agent.contracts import validate_answer, read_jsonl, parse_json
+from tabular_agent.contracts import validate_answer, read_jsonl
 from tabular_agent.evaluate import match, normalize, score
-from tabular_agent.splits import business_partition, select_questions
+from tabular_agent.cli import parser, select_questions
 
 
 class Contracts(unittest.TestCase):
@@ -17,9 +17,6 @@ class Contracts(unittest.TestCase):
                 validate_answer(obj)
 
     def test_json(self):
-        self.assertEqual(parse_json('```json\n{"a":1}\n```'), {'a': 1})
-        with self.assertRaises(ValueError):
-            parse_json('{"x":NaN}')
         with tempfile.TemporaryDirectory() as temp:
             p = Path(temp) / 'x'
             p.write_text('{"id":"a"}\n{"id":"a"}\n')
@@ -55,24 +52,23 @@ class Scoring(unittest.TestCase):
         refs = [{'id': str(i), 'type': 'number', 'answer': 2} for i in range(4)] + [{'id': '4', 'type': 'unanswerable', 'answer': None}]
         preds = [{'id': '0', 'type': 'number', 'answer': 2}, {'id': '1', 'type': 'number', 'answer': 3}, {'id': '2', 'type': 'number', 'answer': True}, {'id': '4', 'type': 'unanswerable'}]
         r = score(qs, preds, refs)
-        self.assertEqual((r['correct'], r['wrong'], r['abstain'], r['invalid'], r['pa']), (2, 2, 1, 1, 0))
-        self.assertEqual(score(qs, [], refs)['pa'], 0)
+        self.assertEqual((r['correct'], r['wrong'], r['abstain'], r['penalized_accuracy']), (2, 2, 1, 0))
+        self.assertEqual(score(qs, [], refs)['penalized_accuracy'], 0)
         with self.assertRaises(ValueError):
             score(qs, preds + [preds[0]], refs)
 
 class EvaluationSplits(unittest.TestCase):
 
     def test_business_partitions_are_disjoint_and_stable(self):
-        qs = [{'id': f'{i}-{j}', 'business_id': f'shop-{i}'} for i in range(80) for j in range(3)]
-        partitions = {p: select_questions(qs, partition=p) for p in ('dev', 'validation', 'holdout')}
+        qs = [{'id': f'{i}-{j}', 'business_id': f'shop-{i}', 'question': 'q', 'as_of_date': '2026-01-01'} for i in range(80) for j in range(3)]
+        partitions = {p: select_questions(qs, parser().parse_args(['bench', '--partition', p, '--limit', '0'])) for p in ('dev', 'validation', 'holdout')}
         businesses = [{q['business_id'] for q in values} for values in partitions.values()]
         self.assertTrue(all(businesses))
         self.assertTrue(all((not a & b for i, a in enumerate(businesses) for b in businesses[i + 1:])))
         self.assertEqual(sum(map(len, partitions.values())), len(qs))
-        self.assertEqual(business_partition('shop-1'), business_partition('shop-1'))
 
     def test_balanced_sample_covers_businesses_before_repeating(self):
-        qs = [{'id': f'{i}-{j}', 'business_id': f'shop-{i}'} for i in range(5) for j in range(20)]
-        sample = select_questions(qs, limit=5, seed=7, sample='balanced')
+        qs = [{'id': f'{i}-{j}', 'business_id': f'shop-{i}', 'question': 'q', 'as_of_date': '2026-01-01'} for i in range(5) for j in range(20)]
+        sample = select_questions(qs, parser().parse_args(['bench', '--limit', '5', '--seed', '7', '--sample', 'balanced']))
         self.assertEqual(len({q['business_id'] for q in sample}), 5)
-        self.assertEqual(sample, select_questions(qs, limit=5, seed=7, sample='balanced'))
+        self.assertEqual(sample, select_questions(qs, parser().parse_args(['bench', '--limit', '5', '--seed', '7', '--sample', 'balanced'])))

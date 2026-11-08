@@ -1,5 +1,6 @@
 """Connect a smolagents PythonExecutor to an isolated bubblewrap worker."""
 import json
+from datetime import date
 import os
 from pathlib import Path
 import selectors
@@ -16,7 +17,8 @@ from .telemetry import is_enabled, record_tool_calls
 
 
 class IsolatedExecutor(PythonExecutor):
-    def __init__(self, business: Path, calendar: Path, timeout: float = 30, emit=None):
+    def __init__(self, business: Path, calendar: Path, timeout: float = 30, emit=None, reject_repeated=False,
+                 as_of_date=None):
         if not shutil.which('bwrap'):
             raise RuntimeError('bubblewrap is required for generated code execution')
         self.business = business.resolve()
@@ -27,6 +29,11 @@ class IsolatedExecutor(PythonExecutor):
         self.scratch = None
         self.buffer = bytearray()
         self.dispatches = 0
+        self.reject_repeated = reject_repeated
+        if as_of_date is not None and date.fromisoformat(as_of_date).isoformat() != as_of_date:
+            raise ValueError('as_of_date must be an ISO date')
+        self.as_of_date = as_of_date
+        self.failed_action = None
 
     def send_tools(self, tools):
         expected = {tool.name: tool for tool in AGENT_TOOLS}
@@ -88,17 +95,25 @@ class IsolatedExecutor(PythonExecutor):
 
     def __call__(self, code_action):
         try:
+            if self.reject_repeated and code_action == self.failed_action:
+                raise ValueError('Repeated failed action; repair the error or abstain')
             if self.process is None:
+                started = time.monotonic()
                 self._start()
-            request = json.dumps({'code': code_action, 'trace_tools': is_enabled()}, ensure_ascii=False).encode() + b'\n'
+                self.emit({'stage': 'timing', 'operation': 'worker_start', 'seconds': time.monotonic() - started})
+            request = json.dumps({'code': code_action, 'trace_tools': is_enabled(), 'as_of_date': self.as_of_date}, ensure_ascii=False).encode() + b'\n'
             if len(request) > 65536:
                 raise ValueError('Code action too large')
             self.dispatches += 1
             self.emit({'stage': 'code', 'code': code_action})
             self.process.stdin.write(request)
+            started = time.monotonic()
             response = self._read()
+            self.emit({'stage': 'timing', 'operation': 'execution', 'seconds': time.monotonic() - started,
+                       'tools': response.get('measurements', [])})
             record_tool_calls(response.get('tool_calls', []))
             if response['status'] != 'ok':
+                self.failed_action = code_action
                 self.cleanup()
                 logs = response.get('logs', '')
                 if logs:

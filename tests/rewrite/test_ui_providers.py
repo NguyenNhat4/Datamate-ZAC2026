@@ -29,6 +29,7 @@ class ProviderUITests(unittest.TestCase):
         try:
             app = AppTest.from_file(str(APP)).run()
             self.assertFalse(app.exception)
+            self.assertEqual([widget.label for widget in app.radio], ['Model provider'])
             app.text_input[1].set_value('fixture-model')
             app.text_input[2].set_value(f'http://127.0.0.1:{server.server_port}/v1')
             app.button[0].click().run()

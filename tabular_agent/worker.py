@@ -1,6 +1,7 @@
 """Run generated Python in a persistent, operating-system-isolated process."""
 import contextlib
 import ast
+import datetime
 from decimal import Decimal
 import io
 import json
@@ -90,12 +91,28 @@ def report_categories(frame):
 def checked_equal(left, right):
     """Flag a missing categorical literal when a closely related value exists."""
     import pandas as pd
-    series, literal = (left, right) if isinstance(left, pd.Series) and isinstance(right, str) else (right, left)
+    series, literal = (left, right) if isinstance(left, pd.Series) else (right, left)
     result = left == right
-    if not isinstance(series, pd.Series) or not isinstance(literal, str) or series.empty:
+    if not isinstance(series, pd.Series) or series.empty:
         return result
     if bool(result.fillna(False).any()):
         return result
+    sample = series.dropna().head(30)
+    if (isinstance(literal, datetime.datetime) and not sample.empty
+            and all(isinstance(value, datetime.date) and not isinstance(value, datetime.datetime) for value in sample)):
+        raise ValueError('Date types do not match. Compare the parsed timestamp column directly with pd.Timestamp(as_of_date).')
+    if isinstance(literal, datetime.date) and not isinstance(literal, datetime.datetime):
+        if (pd.api.types.is_datetime64_any_dtype(series.dtype) or
+                (not sample.empty and all(isinstance(value, str) and re.fullmatch(r'\d{1,2}/\d{1,2}/\d{4}', value.strip())
+                                          for value in sample))):
+            raise ValueError('Date types do not match. Parse the date column and compare with pd.Timestamp(as_of_date).')
+    if not isinstance(literal, str):
+        return result
+    if (re.fullmatch(r'\d{4}-\d{2}-\d{2}', literal) and not sample.empty
+            and all(isinstance(value, str) and re.fullmatch(r'\d{1,2}/\d{1,2}/\d{4}', value.strip())
+                    for value in sample)):
+        raise ValueError('The date column uses day/month/year text but the comparison uses an ISO date. '
+                         'Parse the column and compare dates before accepting an empty result.')
     values = series.dropna().unique()
     if len(values) > 12 or not all(isinstance(value, str) for value in values):
         return result
@@ -140,7 +157,8 @@ def checked_row_count(value):
             column = value[name]
             if isinstance(column, pd.Series) and column.dropna().duplicated().any():
                 raise ValueError(f'Row count is not necessarily an entity count: identifier column {name!r} '
-                                 'has repeated values. For entities use the appropriate ID column and nunique(); '
+                                 'has repeated values. For an order count, use count_orders with the actual date, '
+                                 'ID, status columns and rulebook eligibility; for other entities use nunique(); '
                                  'if the question really asks for rows use len(frame.index).')
     return len(value)
 
@@ -154,6 +172,9 @@ def compile_action(code):
             if isinstance(node.func, ast.Name) and node.func.id == 'len' and len(node.args) == 1 and not node.keywords:
                 return ast.copy_location(ast.Call(func=ast.Name(id='_checked_row_count', ctx=ast.Load()),
                                                   args=node.args, keywords=[]), node)
+            if isinstance(node.func, ast.Attribute) and node.func.attr == 'nunique':
+                return ast.copy_location(ast.Call(func=ast.Name(id='_checked_nunique', ctx=ast.Load()),
+                                                  args=[node.func.value, *node.args], keywords=node.keywords), node)
             return node
 
         def visit_Subscript(self, node):
@@ -174,9 +195,7 @@ def compile_action(code):
                 return ast.copy_location(ast.Call(func=ast.Name(id='_checked_order', ctx=ast.Load()),
                                                   args=[node.left, node.comparators[0], ast.Constant(order_ops[type(node.ops[0])])],
                                                   keywords=[]), node)
-            if (len(node.ops) == 1 and isinstance(node.ops[0], ast.Eq)
-                    and (isinstance(node.left, ast.Constant) and isinstance(node.left.value, str)
-                         or isinstance(node.comparators[0], ast.Constant) and isinstance(node.comparators[0].value, str))):
+            if len(node.ops) == 1 and isinstance(node.ops[0], ast.Eq):
                 return ast.copy_location(ast.Call(func=ast.Name(id='_checked_equal', ctx=ast.Load()),
                                                   args=[node.left, node.comparators[0]], keywords=[]), node)
             return node
@@ -203,18 +222,31 @@ def main():
     os.dup2(output.fileno(), 1)
     os.dup2(output.fileno(), 2)
     calls = []
+    measurements = []
+    table_cache = {}
     trace_enabled = [False]
     reads = {'current': False, 'previous': False}
 
     def bind(tool):
         def call(*args, **kwargs):
+            started = time.monotonic()
+            cache_hit = False
             item = None
             if trace_enabled[0] and len(calls) < 20:
                 item = {'name': tool.name, 'arguments': describe({'args': args, 'kwargs': kwargs})[:1000],
                         'started_ns': time.time_ns()}
                 calls.append(item)
             try:
-                result = tool.forward(*args, **kwargs)
+                cache_key = None
+                if tool.name in {'read_table', 'read_workbook'}:
+                    cache_key = json.dumps([tool.name, args, kwargs], sort_keys=True, ensure_ascii=False)
+                    cache_hit = cache_key in table_cache
+                if cache_hit:
+                    result = table_cache[cache_key].copy(deep=True)
+                else:
+                    result = tool.forward(*args, **kwargs)
+                    if cache_key is not None:
+                        table_cache[cache_key] = result.copy(deep=True)
                 if item is not None:
                     item['result'] = describe(result)[:1000]
                 if tool.name in {'read_table', 'read_workbook'}:
@@ -226,12 +258,33 @@ def main():
                     item['error'] = f'{type(error).__name__}: {error}'[:500]
                 raise
             finally:
+                if len(measurements) < 100:
+                    measurements.append({'tool': tool.name, 'seconds': time.monotonic() - started,
+                                         'cache_hit': cache_hit})
                 if item is not None:
                     item['ended_ns'] = time.time_ns()
         return call
 
     scope = {tool.name: bind(tool) for tool in AGENT_TOOLS}
     import pandas as pd
+    def checked_nunique(value, *args, **kwargs):
+        def normalized(text):
+            text = str(text).casefold().replace('đ', 'd')
+            return ''.join(c for c in unicodedata.normalize('NFKD', text)
+                           if not unicodedata.combining(c)).replace('_', ' ')
+        if (isinstance(value, pd.Series) and isinstance(value.name, str)
+                and ('don hang' in normalized(value.name) or 'order' in normalized(value.name))):
+            # Check the same selected rows, not an unrelated or unfiltered table.
+            for frame in reversed(list(scope.values())):
+                if (isinstance(frame, pd.DataFrame) and frame.index.is_unique and value.index.is_unique
+                        and value.name in frame.columns and value.index.isin(frame.index).all()
+                        and any('trang thai' in normalized(c) or 'status' in normalized(c) for c in frame.columns)):
+                    selected = frame.loc[value.index]
+                    if selected[value.name].equals(value):
+                        from tools import count_entities
+                        count_entities.forward(selected, value.name)
+                        break
+        return value.nunique(*args, **kwargs)
     def show_inspection(value):
         print(repr(value)[:6000])
 
@@ -247,13 +300,17 @@ def main():
 
     scope.update({'__name__': '__main__', 'final_answer': observed_final_answer, '_show_inspection': show_inspection,
                   '_checked_equal': checked_equal, '_checked_order': checked_order,
-                  '_checked_row_count': checked_row_count, 'pd': pd})
+                  '_checked_row_count': checked_row_count, '_checked_nunique': checked_nunique,
+                  'pd': pd, 'datetime': datetime})
     protocol.write('{"status":"ready"}\n')
     for line in sys.stdin:
         logs = None
         try:
             request = json.loads(line)
+            if request.get('as_of_date') is not None:
+                scope['as_of_date'] = request['as_of_date']
             calls.clear()
+            measurements.clear()
             reads['current'] = False
             trace_enabled[0] = request.get('trace_tools') is True
             logs = BoundedLog()
@@ -273,7 +330,7 @@ def main():
             if reads['current']:
                 reads['previous'] = True
             response = {'status': 'ok', 'logs': logs.getvalue()[:8000], 'output': result, 'final': final,
-                        'tool_calls': calls}
+                        'tool_calls': calls, 'measurements': measurements}
             try:
                 encoded = json.dumps(response, ensure_ascii=False, allow_nan=False, default=encode_decimal)
             except TypeError as error:
@@ -285,7 +342,7 @@ def main():
         except BaseException as error:
             encoded = json.dumps({'status': 'error', 'error': f'{type(error).__name__}: {error}',
                                   'logs': logs.getvalue()[:8000] if logs is not None else '',
-                                  'tool_calls': calls}, ensure_ascii=False)
+                                  'tool_calls': calls, 'measurements': measurements}, ensure_ascii=False)
         protocol.write(encoded + '\n')
 
 

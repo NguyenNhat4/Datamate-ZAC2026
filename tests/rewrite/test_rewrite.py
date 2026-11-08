@@ -13,9 +13,9 @@ from unittest.mock import patch
 import yaml
 
 from smolagents import Model
-from smolagents.models import ChatMessage, MessageRole, ChatMessageToolCall, ChatMessageToolCallFunction
+from smolagents.models import ChatMessage, MessageRole
 from smolagents.local_python_executor import CodeOutput
-from tabular_agent.agent import build_agent, answer_with_verification, TabularManager, TypedFinalAnswer
+from tabular_agent.agent import build_agent
 from tabular_agent.cli import parser, run, time_limit, QuestionDeadlineExceeded
 from tabular_agent.contracts import validate_answer
 from tabular_agent.evaluate import match, score
@@ -46,30 +46,25 @@ class RewriteTests(unittest.TestCase):
                 except Exception:
                     self.fail('agent caught the deadline')
 
-    def test_manager_uses_original_toolcalling_template(self):
-        manager = TabularManager(tools=[], model=ScriptedModel(), records={})
-        template = yaml.safe_load(importlib.resources.files('smolagents.prompts').joinpath('toolcalling_agent.yaml').read_text())
-        self.assertEqual(manager.prompt_templates, template)
 
-    def test_manager_retries_truncated_output_without_executing_it(self):
-        class TruncatedThenAbstain(Model):
+    def test_single_agent_retries_truncated_response_without_execution(self):
+        class TruncatedThenAnswer(Model):
             def __init__(self):
                 super().__init__()
-                self.requests = []
+                self.calls = 0
 
             def generate(self, messages, **kwargs):
-                self.requests.append(str(messages))
-                if len(self.requests) == 1:
+                self.calls += 1
+                if self.calls == 1:
                     raise ValueError("Incomplete model response ('length'); generated code was not executed")
-                call = ChatMessageToolCall(function=ChatMessageToolCallFunction(
-                    name='final_answer', arguments={'answer': {'type': 'abstain'}}), id='call', type='function')
-                return ChatMessage(role=MessageRole.ASSISTANT, tool_calls=[call])
+                return ChatMessage(role=MessageRole.ASSISTANT,
+                                   content="Thought: finish.\n<code>\nfinal_answer({'type':'number','answer':2})\n</code>")
 
-        model = TruncatedThenAbstain()
-        manager = TabularManager(tools=[TypedFinalAnswer()], model=model, records={}, max_steps=2, verbosity_level=0)
-        self.assertEqual(manager.run('Synthetic question')['type'], 'abstain')
-        self.assertEqual(len(model.requests), 2)
-        self.assertIn('truncated and not executed', model.requests[1])
+        model = TruncatedThenAnswer()
+        with patch('tabular_agent.agent.IsolatedExecutor', FakeExecutor):
+            agent, _ = build_agent(model, None, None, max_steps=3, limit_repairs=True)
+            self.assertEqual(agent.run('Synthetic question'), {'type': 'number', 'answer': 2})
+        self.assertEqual(model.calls, 2)
 
     def test_distinct_percentage_counts_entities_and_checks_categories(self):
         import pandas as pd
@@ -182,7 +177,7 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(set(executor.tools), {tool.name for tool in AGENT_TOOLS} | {'final_answer'})
         text = str(model.messages)
         self.assertIn('0.36', text)
-        self.assertIn('reload the data and recompute', text)
+        self.assertIn('reload data and fix the cause', text)
         for tool in AGENT_TOOLS:
             self.assertIn(tool.name, text)
             self.assertIn(tool.description, text)
@@ -225,7 +220,7 @@ class RewriteTests(unittest.TestCase):
             (split / 'questions.jsonl').write_text(json.dumps({'id':'q1','business_id':'shop','question':'Q?', 'as_of_date':'2026-01-01'}) + '\n')
             out = root / 'out'
             args = parser().parse_args(['predict', '--split', str(split), '--output', str(out), '--model', 'stub'])
-            with patch('tabular_agent.cli.create_model', return_value=object()), patch('tabular_agent.cli.answer_with_verification', return_value={'type': 'number', 'answer': 2}) as answer:
+            with patch('tabular_agent.cli.create_model', return_value=object()), patch('tabular_agent.cli.source_preview', return_value='synthetic preview'), patch('tabular_agent.cli.answer_question', return_value={'type': 'number', 'answer': 2}) as answer:
                 self.assertEqual(run(args), 0)
             self.assertEqual(json.loads((out / 'submission.jsonl').read_text()), {'id':'q1','type':'number','answer':2})
             self.assertEqual(answer.call_args.args[4], 'Current rules')

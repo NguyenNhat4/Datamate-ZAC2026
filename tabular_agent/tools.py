@@ -243,5 +243,191 @@ def distinct_percentage(frame: Any, id_column: str, category_column: str,
     return 100.0 * matching / total
 
 
+@tool
+def date_window(as_of_date: str, period: str) -> dict:
+    """Return inclusive dates for a named period relative to as_of_date.
+
+    Args:
+        as_of_date: Reference date in ISO format.
+        period: One of today, yesterday, this_week, last_week, this_month, previous_month_comparable, or year_to_date.
+    """
+    from datetime import date, timedelta
+    import calendar
+    today = date.fromisoformat(as_of_date)
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+    previous_end = month_start - timedelta(days=1)
+    windows = {
+        'today': (today, today), 'yesterday': (today - timedelta(days=1), today - timedelta(days=1)),
+        'this_week': (week_start, today), 'last_week': (week_start - timedelta(days=7), week_start - timedelta(days=1)),
+        'this_month': (month_start, today), 'year_to_date': (today.replace(month=1, day=1), today),
+        'previous_month_comparable': (previous_end.replace(day=1), previous_end.replace(day=min(today.day, calendar.monthrange(previous_end.year, previous_end.month)[1]))),
+    }
+    if period not in windows:
+        raise ValueError('Unsupported period; use explicit boundaries from the current rulebook')
+    start, end = windows[period]
+    return {'start': start.isoformat(), 'end': end.isoformat(), 'inclusive': True}
+
+
+@tool
+def filter_categories(frame: Any, column: str, values: list[Any], allow_absent: bool = False) -> Any:
+    """Filter by exact observed category labels and show row counts.
+
+    Args:
+        frame: Complete DataFrame to filter.
+        column: Actual category column name.
+        values: Exact values to include, using the same types as the column.
+        allow_absent: True only after checking an absent category is valid.
+    """
+    if not values:
+        raise ValueError('Supply one or more exact values')
+    mask = frame[column].isin(values)
+    missing = [str(value) for value in values if not frame[column].isin([value]).any()]
+    if missing and not allow_absent:
+        import re
+        sample = frame[column].dropna().head(30)
+        if (len(values) == 1 and isinstance(values[0], str)
+                and re.fullmatch(r'\d{4}-\d{2}-\d{2}', values[0]) and not sample.empty
+                and all(isinstance(value, str) and re.fullmatch(r'\d{1,2}/\d{1,2}/\d{4}', value.strip())
+                        for value in sample)):
+            raise ValueError('Date values use day/month/year, not ISO text. Parse the column with '
+                             "parse_dates(column, date_format='%d/%m/%Y') and compare to pd.Timestamp(as_of_date).")
+        observed = sorted(set(frame[column].dropna().astype(str)))
+        raise ValueError(f'Category labels not present: {missing}; observed: {observed[:30]}')
+    result = frame.loc[mask].copy()
+    print(f'Category filter {column}: {len(frame)} rows before, {len(result)} after')
+    return result
+
+
+@tool
+def count_entities(frame: Any, id_column: str, allow_flagged_order_status: bool = False) -> int:
+    """Count distinct nonmissing entity identifiers; flag cancelled/returned order statuses.
+
+    Args:
+        frame: DataFrame containing the selected entities.
+        id_column: Column identifying the entity.
+        allow_flagged_order_status: Set true only if the question or rulebook requires the flagged statuses.
+    """
+    import unicodedata
+    def normalize(value):
+        value = unicodedata.normalize('NFKD', str(value).casefold().replace('đ', 'd'))
+        return ' '.join(''.join(c if c.isalnum() else ' ' for c in value if not unicodedata.combining(c)).split())
+    identifier = normalize(id_column)
+    is_order_id = ('don hang' in identifier or 'order' in identifier) and any(
+        part in identifier.split() for part in ('ma', 'id', 'code', 'number', 'so'))
+    if is_order_id and not allow_flagged_order_status:
+        for column in frame.columns:
+            if not any(term in normalize(column) for term in ('trang thai', 'status')):
+                continue
+            labels = {str(value): normalize(value) for value in frame[column].dropna().unique()}
+            excluded = [label for label, value in labels.items()
+                        if any(term in value for term in ('huy', 'hoan hang', 'tra hang', 'cancel', 'return'))]
+            if excluded:
+                raise ValueError(f'Order statuses include {excluded}. Check the question and '
+                                 'rulebook, filter eligible orders using observed labels before counting, or set '
+                                 'allow_flagged_order_status=True only when the question or rulebook requires those statuses.')
+    ids = frame[id_column]
+    if ids.isna().any() or ids.astype(str).str.strip().eq('').any():
+        raise ValueError('Resolve missing entity identifiers before counting')
+    result = int(ids.nunique())
+    print(f'Entity count {id_column}: {len(frame)} rows, {result} distinct')
+    return result
+
+
+@tool
+def count_orders(frame: Any, id_column: str, date_column: str, status_column: str,
+                 start_date: str, end_date: str, date_format: str,
+                 exclude_cancelled_and_returned: bool) -> int:
+    """Count distinct orders in an inclusive period with explicit eligibility; inspect unfamiliar status labels.
+
+    Args:
+        frame: Complete order line DataFrame.
+        id_column: Column identifying each order.
+        date_column: Column containing the order date.
+        status_column: Column containing the order status.
+        start_date: Inclusive ISO start date.
+        end_date: Inclusive ISO end date.
+        date_format: Explicit source date format, for example %d/%m/%Y.
+        exclude_cancelled_and_returned: True when the applicable rule requires excluding cancelled and returned orders.
+    """
+    from datetime import date
+    import unicodedata
+    import pandas as pd
+    if type(exclude_cancelled_and_returned) is not bool:
+        raise ValueError('Order eligibility must be an explicit boolean')
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    if start > end:
+        raise ValueError('Start date must not be after end date')
+    for column in (id_column, date_column, status_column):
+        if column not in frame.columns:
+            raise ValueError(f'Column {column!r} not found; available: {list(frame.columns)}')
+    ids = frame[id_column]
+    rows = frame.loc[ids.notna() & ids.astype(str).str.strip().ne('')].copy()
+    raw_dates = rows[date_column].replace(r'^\s*$', None, regex=True)
+    dates = pd.to_datetime(raw_dates, format=date_format, errors='raise')
+    if dates.isna().any():
+        raise ValueError('Some orders have missing dates; resolve them before counting')
+    if dates.empty or pd.Timestamp(end) < dates.min().normalize() or pd.Timestamp(start) > dates.max().normalize():
+        raise ValueError('Requested period is outside the observed order-date coverage; inspect the source before answering')
+    rows = rows.loc[dates.between(pd.Timestamp(start), pd.Timestamp(end), inclusive='both')]
+    if exclude_cancelled_and_returned and (rows[status_column].isna().any() or rows[status_column].astype(str).str.strip().eq('').any()):
+        raise ValueError('Some selected orders have missing status; resolve eligibility before counting')
+    def normalize(value):
+        value = unicodedata.normalize('NFKD', str(value).casefold().replace('đ', 'd'))
+        return ' '.join(''.join(c if c.isalnum() else ' ' for c in value if not unicodedata.combining(c)).split())
+    statuses = rows[status_column].fillna('').map(normalize)
+    if exclude_cancelled_and_returned and statuses.str.contains(r'\b(?:khong|chua|not|no) (?:huy|hoan hang|tra hang|cancel\w*|return\w*)\b', regex=True).any():
+        raise ValueError('Negated cancellation or return status is ambiguous; resolve status labels explicitly')
+    excluded = statuses.str.contains(r'\b(?:huy|hoan hang|tra hang|cancel\w*|return\w*)\b', regex=True)
+    invalid_ids = set(rows.loc[excluded, id_column]) if exclude_cancelled_and_returned else set()
+    result = int(rows.loc[~rows[id_column].isin(invalid_ids), id_column].nunique())
+    print(f'Orders: period {start} to {end}, statuses={sorted(set(rows[status_column].astype(str)))[:30]}, '
+          f'excluded order IDs={len(invalid_ids)}, distinct included={result}')
+    return result
+
+
+@tool
+def checked_join(left: Any, right: Any, on: str, cardinality: str, how: str = 'left') -> Any:
+    """Join two tables with explicit cardinality and unmatched row counts.
+
+    Args:
+        left: Left DataFrame.
+        right: Right DataFrame.
+        on: Shared join column.
+        cardinality: One of one_to_one, one_to_many, many_to_one, or many_to_many.
+        how: Join type: left, right, inner, or outer.
+    """
+    import pandas as pd
+    if cardinality not in {'one_to_one', 'one_to_many', 'many_to_one', 'many_to_many'} or how not in {'left', 'right', 'inner', 'outer'}:
+        raise ValueError('Invalid join cardinality or join type')
+    if left[on].isna().any() or right[on].isna().any():
+        raise ValueError('Resolve null join keys before joining')
+    left_missing = int((~left[on].isin(right[on])).sum())
+    right_missing = int((~right[on].isin(left[on])).sum())
+    result = pd.merge(left, right, on=on, how=how, validate=cardinality)
+    print(f'Join {on}: {len(left)} left, {len(right)} right, {len(result)} output; unmatched rows left={left_missing}, right={right_missing}')
+    return result
+
+
+@tool
+def round_decimal(value: Any, places: int, mode: str = 'half_up') -> Any:
+    """Round a numeric value using an explicit Decimal rounding mode.
+
+    Args:
+        value: Numeric value to round.
+        places: Number of decimal places from 0 to 6.
+        mode: Rounding mode: half_up or half_even.
+    """
+    from decimal import Decimal, ROUND_HALF_UP, ROUND_HALF_EVEN
+    if type(places) is not int or not 0 <= places <= 6 or mode not in {'half_up', 'half_even'}:
+        raise ValueError('Invalid rounding precision or mode')
+    number = Decimal(str(value))
+    if not number.is_finite():
+        raise ValueError('Cannot round a non-finite value')
+    return number.quantize(Decimal(1).scaleb(-places), rounding={'half_up': ROUND_HALF_UP, 'half_even': ROUND_HALF_EVEN}[mode])
+
+
 AGENT_TOOLS = [list_files, inspect_table, read_table, read_workbook, parse_numbers, parse_dates,
-               profile_columns, distinct_percentage]
+               profile_columns, distinct_percentage, date_window, filter_categories, count_entities, count_orders,
+               checked_join, round_decimal]
