@@ -1,6 +1,6 @@
 # Tabular analysis agent
 
-A `smolagents.CodeAgent` answers Vietnamese questions about CSV, Excel and SQLite files. It can use a local model server or the OpenAI API. The tool definitions and descriptions are together in [tabular_agent/tools.py](tabular_agent/tools.py); [tabular_agent/agent.py](tabular_agent/agent.py) passes them directly to `CodeAgent`.
+A `smolagents.ToolCallingAgent` delegates Vietnamese tabular questions to managed `CodeAgent` workers. The manager and workers use the framework's original prompt templates with task-specific instructions and can use a local model server or the OpenAI API. Tool definitions are in [tabular_agent/tools.py](tabular_agent/tools.py); [tabular_agent/agent.py](tabular_agent/agent.py) builds the team.
 
 For the data contract, answer types and reference evaluation profile, see [project-overview.md](project-overview.md). The current split's `rulebook.md`, each business's `README.md`, and `as_of_date` are provided to the agent. Reference answers are read only after a benchmark's inference has finished.
 
@@ -66,6 +66,24 @@ Smolagents keeps the task, actions, observations, and errors in its in-memory `A
 
 Each question creates a fresh agent and worker; memory from a previous question is not reused. The recorded logs may contain full questions, rulebooks, business notes, and observations, so keep them local. The agent does not automatically summarize or prune its memory; the `--context` setting is not currently enforced as a token limit.
 
+For each question, the native smolagents manager can delegate to a solver, reviewer, and adjudicator. Every managed `CodeAgent` runs generated code in its own isolated worker and receives the original question, split rulebook and business README. The reviewer can see the solver's answer and a bounded excerpt of its code and observations; the adjudicator can see prior agent work. Once two distinct managed agents agree exactly on an answer, the manager returns it automatically. A manager-submitted answer is accepted only after both solver and reviewer ran and at least two managed agents agree (for `unanswerable`, the reasons may differ); otherwise it must keep working or abstain. The UI and logs identify each role and manager tool calls. Agreement does not prove correctness, especially because agents can see prior work and use the same model. More agents increase runtime and may reduce coverage. The question timeout covers all roles. The model endpoint must support tool calling for the manager.
+
+Before delegation, the runner gathers a bounded file and schema preview in a separate read-only isolated worker. It includes at most eight files and two sheets or tables per file, and at most the first row per preview; it is not a complete source read or evidence of date coverage. Previewed business rows may appear in model context and local logs.
+
+Bare `list_files()` and `inspect_table(...)` calls display their results in the worker observations. Other intermediate values should be printed explicitly. Excel workbooks with one sheet can be read without a sheet argument; workbooks with multiple sheets require a selection.
+
+`profile_columns` summarizes observed values and missing entries in selected DataFrame columns; `parse_dates` uses an explicit date format. A fresh worker provides pandas as `pd`, but computed variables are lost after an execution error.
+
+Full table reads report a bounded list of observed values for low-cardinality text columns to help identify categorical labels. These observations can contain business data and are included in the local logs and model context.
+
+`distinct_percentage` computes a percentage over distinct IDs in a selected period and checks for conflicting or missing categories. If an agent reads its first table and attempts to answer in the same action, the worker defers the answer for a separate step so the agent can review the read observations; this is not a semantic correctness guarantee.
+
+An `unanswerable` conclusion requires at least one complete source read; an agent that cannot establish absence can abstain. A complete read alone does not prove that all relevant sources were inspected.
+
+The worker flags some near-miss categorical equality filters and day-first date strings ordered as text. A near-miss can be a legitimate empty result; after inspecting the data, the agent can explicitly use `Series.eq` to retain exact-match behavior. These checks cover only some generated expressions and do not prove a calculation is correct.
+
+When generated code uses `len(frame)` or `frame.shape[0]` on a DataFrame with repeated values in a column named like an identifier, the worker asks the agent to choose between a distinct entity count and an explicit row count (`len(frame.index)`). This heuristic can flag valid row counts and does not cover every way of counting rows.
+
 This uses the step callbacks described in the [smolagents memory guide](https://huggingface.co/docs/smolagents/v1.26.0/en/tutorials/memory). The saved step view is for inspection; it is not a resumable agent session.
 
 ## Inspect runs with OpenTelemetry
@@ -98,7 +116,7 @@ Tracing is off by default and exports only to `127.0.0.1:6006`. It can record qu
 - `model.py`: local and OpenAI API `OpenAIModel` configurations.
 - `contracts.py`, `evaluate.py`, and `cli.py`: typed outputs, internal scoring, and the runner.
 
-The rewrite uses a task-specific system prompt and the framework's tool descriptions. It no longer includes the previous calculation-evidence validator, audit helpers, detailed dashboard, or trace format. Typed output validation and basic isolation tests do not prove answer accuracy, and real-model quality and final deployment compatibility remain to be evaluated.
+The agents use the framework's original system prompt, task-specific instructions, and the framework's tool descriptions. Typed output validation and isolation tests do not prove answer accuracy, and real-model quality and final deployment compatibility remain to be evaluated.
 
 ## Checks
 

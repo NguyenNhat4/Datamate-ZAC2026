@@ -48,7 +48,8 @@ def inspect_table(name: str, sheet: str | None = None, table: str | None = None)
             if sheet is None:
                 return {'sheets': book.sheetnames}
             if sheet not in book.sheetnames:
-                raise ValueError(f'Choose sheet from {book.sheetnames}')
+                raise ValueError(f'Unknown Excel sheet {sheet!r}; available sheets: {book.sheetnames}. '
+                                 'Call inspect_table(name) to list sheets, then use sheet=<sheet name>.')
             from itertools import islice
             return {'sheet': sheet, 'rows': list(islice(book[sheet].values, 8))}
         finally:
@@ -74,7 +75,7 @@ def inspect_table(name: str, sheet: str | None = None, table: str | None = None)
 @tool
 def read_table(name: str, sheet: str | None = None, table: str | None = None,
                header_row: int = 0, delimiter: str | None = None) -> Any:
-    """Read a complete CSV, Excel sheet or SQLite table as a pandas DataFrame. Inspect headers and formats first; CSV values remain text.
+    """Read a complete CSV, Excel sheet or SQLite table as a pandas DataFrame. Inspect headers and formats first; values may be text even in Excel. A single Excel sheet is selected automatically.
 
     Args:
         name: File alias or relative filename.
@@ -87,7 +88,10 @@ def read_table(name: str, sheet: str | None = None, table: str | None = None,
     path = _source(name)
     if path.suffix.lower() == '.xlsx':
         if sheet is None:
-            raise ValueError('Inspect the workbook and specify a sheet')
+            sheets = inspect_table.forward(name)['sheets']
+            if len(sheets) != 1:
+                raise ValueError(f'Choose an Excel sheet using sheet=<name>; available sheets: {sheets}')
+            sheet = sheets[0]
         return pd.read_excel(path, sheet_name=sheet, header=header_row, dtype=object)
     if path.suffix.lower() == '.csv':
         if delimiter is None:
@@ -143,18 +147,101 @@ def parse_numbers(values: Any, decimal_separator: str, thousands_separator: str)
         integer, separator, fraction = value.partition(decimal_separator)
         integer = integer.lstrip('+-')
         if not integer or (separator and (not fraction.isdigit() or decimal_separator in fraction)):
-            raise ValueError(f'Invalid numeric format: {value!r}')
+            raise ValueError(f'Invalid numeric format: {value!r}. Check the actual separators; '
+                             "for example '5,606,000' uses decimal_separator='.' and thousands_separator=','. ")
         if thousands_separator and thousands_separator in integer:
             parts = integer.split(thousands_separator)
             if not (1 <= len(parts[0]) <= 3 and parts[0].isdigit()
                     and all(len(part) == 3 and part.isdigit() for part in parts[1:])):
                 raise ValueError(f'Invalid thousands grouping: {value!r}')
         elif not integer.isdigit():
-            raise ValueError(f'Invalid numeric format: {value!r}')
+            raise ValueError(f'Invalid numeric format: {value!r}. Check the actual separators; '
+                             "for example '5,606,000' uses decimal_separator='.' and thousands_separator=','. ")
         if thousands_separator:
             value = value.replace(thousands_separator, '')
         return Decimal(value.replace(decimal_separator, '.'))
     return pd.Series(values).map(parse)
 
 
-AGENT_TOOLS = [list_files, inspect_table, read_table, read_workbook, parse_numbers]
+@tool
+def parse_dates(values: Any, date_format: str) -> Any:
+    """Parse a date column using an explicit format, preserving its index. Invalid nonempty values raise an error.
+
+    Args:
+        values: A pandas Series or list of dates.
+        date_format: Python date format, for example %d/%m/%Y or %Y-%m-%d.
+    """
+    import pandas as pd
+    series = pd.Series(values)
+    return pd.to_datetime(series.replace(r'^\s*$', None, regex=True), format=date_format, errors='raise')
+
+
+@tool
+def profile_columns(frame: Any, columns: list[str]) -> dict:
+    """Summarize selected columns of a complete DataFrame, including nulls and frequent values.
+
+    Args:
+        frame: DataFrame returned by read_table or read_workbook.
+        columns: Actual column names to summarize.
+    """
+    import pandas as pd
+    if not isinstance(frame, pd.DataFrame):
+        raise ValueError('profile_columns requires a DataFrame')
+    missing = [name for name in columns if name not in frame.columns]
+    if missing:
+        raise ValueError(f'Columns not found: {missing}; available columns: {list(frame.columns)}')
+    result = {}
+    for name in columns:
+        column = frame[name]
+        counts = column.dropna().astype(str).value_counts()
+        result[name] = {'rows': len(column), 'nulls': int(column.isna().sum()),
+                        'distinct': int(len(counts)),
+                        'frequent_values': [{'value': str(value)[:160], 'count': int(count)}
+                                            for value, count in counts.head(12).items()],
+                        'truncated': len(counts) > 12}
+    return result
+
+
+@tool
+def distinct_percentage(frame: Any, id_column: str, category_column: str,
+                        selected_values: list[str], allow_absent: bool = False) -> float:
+    """Percent of distinct IDs in a prefiltered DataFrame matching observed category values.
+
+    Args:
+        frame: Complete DataFrame already filtered to the requested period.
+        id_column: Column identifying each entity, such as an order ID.
+        category_column: Column containing the category for each entity.
+        selected_values: Exact category values observed in the data to count.
+        allow_absent: Set true only after confirming that an absent category legitimately means zero in this period.
+    """
+    import pandas as pd
+    if not isinstance(frame, pd.DataFrame):
+        raise ValueError('distinct_percentage requires a DataFrame')
+    missing = [column for column in (id_column, category_column) if column not in frame.columns]
+    if missing:
+        raise ValueError(f'Columns not found: {missing}; available columns: {list(frame.columns)}')
+    if not selected_values or not all(isinstance(value, str) for value in selected_values):
+        raise ValueError('Select one or more observed category strings')
+    relevant = frame[[id_column, category_column]].copy()
+    if relevant[id_column].isna().any():
+        raise ValueError('Missing IDs: resolve them from the source rules before counting')
+    relevant = relevant.drop_duplicates()
+    observed = set(relevant[category_column].dropna().astype(str))
+    absent = set(selected_values) - observed
+    if absent and not allow_absent:
+        raise ValueError(f'Selected category values not present: {sorted(absent)}; '
+                         f'observed values: {sorted(observed)[:30]}. Verify the requested category and period.')
+    inconsistent = relevant.dropna(subset=[category_column]).groupby(id_column)[category_column].nunique()
+    if (inconsistent > 1).any():
+        raise ValueError('Some IDs have conflicting category values; resolve them before counting')
+    if relevant[id_column].nunique() != len(inconsistent):
+        raise ValueError('Some IDs have no known category; resolve them before counting')
+    total = relevant[id_column].nunique()
+    if not total:
+        raise ValueError('No IDs in period; check data coverage before answering')
+    matching = relevant.loc[relevant[category_column].isin(selected_values), id_column].nunique()
+    return 100.0 * matching / total
+
+
+AGENT_TOOLS = [list_files, inspect_table, read_table, read_workbook, parse_numbers, parse_dates,
+               profile_columns, distinct_percentage]

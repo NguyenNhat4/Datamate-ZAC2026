@@ -4,11 +4,32 @@ import unittest
 from unittest.mock import patch
 
 from openai.types.chat import ChatCompletion
+from smolagents.models import ChatMessage, MessageRole, ChatMessageToolCall, ChatMessageToolCallFunction
 from tabular_agent.cli import parser, run
-from tabular_agent.model import create_model, create_openai_model, openai_api_key, openai_model_name
+from tabular_agent.model import create_model, create_openai_model, openai_api_key, openai_model_name, normalize_final_json
 
 
 class ProviderTests(unittest.TestCase):
+    def test_only_valid_explicit_final_json_becomes_code(self):
+        original = 'Thought: done.\nFinal Answer:\n```json\n{"type":"percent","answer":1.66}\n```</code>'
+        self.assertIn("final_answer({'type': 'percent', 'answer': 1.66})", normalize_final_json(original))
+        for content in ['```json\n{"type":"number","answer":1}\n```',
+                        'Final Answer: ```json\n{"type":"number","answer":"bad"}\n```',
+                        '<code>print(1)</code>\nFinal Answer: ```json\n{"type":"number","answer":1}\n```']:
+            self.assertEqual(normalize_final_json(content), content)
+
+    def test_local_model_accepts_native_tool_call_finish(self):
+        model = create_model('fixture', 'http://127.0.0.1:8000/v1')
+        call = ChatMessageToolCall(function=ChatMessageToolCallFunction(name='solver', arguments={'task': 'solve'}),
+                                   id='call1', type='function')
+        response = ChatMessage(role=MessageRole.ASSISTANT, tool_calls=[call],
+                               raw={'choices': [{'finish_reason': 'tool_calls'}]})
+        try:
+            with patch('smolagents.OpenAIModel.generate', return_value=response):
+                self.assertEqual(model.generate([], tools_to_call_from=['sentinel']).tool_calls[0].function.name, 'solver')
+        finally:
+            model.client.close()
+
     def test_environment_key_takes_precedence_over_dotenv(self):
         with patch.dict(os.environ, {'OPENAI_API_KEY': 'environment-key'}, clear=True):
             with patch('tabular_agent.model.dotenv_values') as dotenv:

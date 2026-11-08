@@ -13,6 +13,7 @@ def memory_callback(emit):
             'model_input_messages': data['model_input_messages'],
             'model_output': data['model_output'],
             'code_action': data['code_action'],
+            'tool_calls': data.get('tool_calls'),
             'observations': data['observations'],
             'error': data['error'],
             'token_usage': data['token_usage'],

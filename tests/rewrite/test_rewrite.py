@@ -1,17 +1,22 @@
 """Synthetic checks for the rewritten agent; no model service or test answers are used."""
 import json
 import importlib.util
+import importlib.resources
+import contextlib
+import io
 from decimal import Decimal
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
+import yaml
 
 from smolagents import Model
 from smolagents.models import ChatMessage, MessageRole
 from smolagents.local_python_executor import CodeOutput
-from tabular_agent.agent import build_agent
-from tabular_agent.cli import parser, run
+from tabular_agent.agent import build_agent, answer_with_verification, TabularManager
+from tabular_agent.cli import parser, run, time_limit, QuestionDeadlineExceeded
 from tabular_agent.contracts import validate_answer
 from tabular_agent.evaluate import match, score
 from tabular_agent.model import create_model
@@ -33,6 +38,87 @@ class FakeExecutor:
 
 
 class RewriteTests(unittest.TestCase):
+    def test_question_deadline_cannot_be_swallowed_by_agent_exception_handler(self):
+        with self.assertRaises(QuestionDeadlineExceeded):
+            with time_limit(0.02):
+                try:
+                    time.sleep(0.2)
+                except Exception:
+                    self.fail('agent caught the deadline')
+
+    def test_manager_uses_original_toolcalling_template(self):
+        manager = TabularManager(tools=[], model=ScriptedModel(), records={})
+        template = yaml.safe_load(importlib.resources.files('smolagents.prompts').joinpath('toolcalling_agent.yaml').read_text())
+        self.assertEqual(manager.prompt_templates, template)
+
+    def test_distinct_percentage_counts_entities_and_checks_categories(self):
+        import pandas as pd
+        from tabular_agent.tools import distinct_percentage
+        frame = pd.DataFrame({'id': ['A', 'A', 'B', 'C', 'C'],
+                              'status': ['complete', 'complete', 'cancelled', 'complete', 'complete']})
+        self.assertAlmostEqual(distinct_percentage.forward(frame, 'id', 'status', ['cancelled']), 100 / 3)
+        with self.assertRaisesRegex(ValueError, 'not present'):
+            distinct_percentage.forward(frame, 'id', 'status', ['cancel'])
+        self.assertEqual(distinct_percentage.forward(frame, 'id', 'status', ['cancel'], True), 0)
+        frame.loc[0, 'status'] = 'cancelled'
+        with self.assertRaisesRegex(ValueError, 'conflicting'):
+            distinct_percentage.forward(frame, 'id', 'status', ['cancelled'])
+
+    def test_column_profile_reports_missing_and_observed_values(self):
+        import pandas as pd
+        from tabular_agent.tools import profile_columns
+        df = pd.DataFrame({'status': ['done', None, 'cancelled', 'done']})
+        result = profile_columns.forward(df, ['status'])['status']
+        self.assertEqual((result['rows'], result['nulls'], result['distinct']), (4, 1, 2))
+        self.assertEqual(result['frequent_values'][0], {'value': 'done', 'count': 2})
+        with self.assertRaisesRegex(ValueError, 'available columns'):
+            profile_columns.forward(df, ['missing'])
+
+    def test_explicit_date_parser_preserves_index_and_rejects_bad_values(self):
+        import pandas as pd
+        from tabular_agent.tools import parse_dates
+        series = pd.Series(['02/03/2025', None], index=[4, 7])
+        result = parse_dates.forward(series, '%d/%m/%Y')
+        self.assertEqual(list(result.index), [4, 7])
+        self.assertEqual(result.iloc[0].strftime('%Y-%m-%d'), '2025-03-02')
+        self.assertTrue(pd.isna(result.iloc[1]))
+        with self.assertRaises(ValueError):
+            parse_dates.forward(['31/02/2025'], '%d/%m/%Y')
+
+    def test_bare_inspections_are_visible_and_evaluated_once(self):
+        spec = importlib.util.spec_from_file_location('worker_for_test', Path(__file__).parents[2] / 'tabular_agent' / 'worker.py')
+        module = importlib.util.module_from_spec(spec)
+        from tabular_agent import tools
+        with patch.dict('sys.modules', {'tools': tools}):
+            spec.loader.exec_module(module)
+        calls = []
+        output = io.StringIO()
+        def listing():
+            calls.append(1)
+            return [{'alias': 'F1'}]
+        scope = {'list_files': listing, '_show_inspection': lambda value: print(repr(value))}
+        with contextlib.redirect_stdout(output):
+            exec(module.compile_action('list_files()\nitems = list_files()'), scope)
+        self.assertIn('F1', output.getvalue())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(scope['items'], [{'alias': 'F1'}])
+
+    def test_single_excel_sheet_can_be_read_without_sheet_argument(self):
+        import openpyxl
+        from tabular_agent.tools import read_table
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'orders.xlsx'
+            book = openpyxl.Workbook()
+            book.active.append(['amount'])
+            book.active.append([12])
+            book.save(path)
+            with patch('tabular_agent.tools._source', return_value=path):
+                self.assertEqual(read_table.forward('F1')['amount'].tolist(), [12])
+                book.create_sheet('Other')
+                book.save(path)
+                with self.assertRaisesRegex(ValueError, 'available sheets'):
+                    read_table.forward('F1')
+
     def test_decimal_encoding_preserves_values_and_rejects_precision_loss(self):
         spec = importlib.util.spec_from_file_location('worker_for_test', Path(__file__).parents[2] / 'tabular_agent' / 'worker.py')
         module = importlib.util.module_from_spec(spec)
@@ -70,11 +156,13 @@ class RewriteTests(unittest.TestCase):
         model = ScriptedModel()
         with patch('tabular_agent.agent.IsolatedExecutor', FakeExecutor):
             agent, executor = build_agent(model, None, None)
+            template = yaml.safe_load(importlib.resources.files('smolagents.prompts').joinpath('code_agent.yaml').read_text())
+            self.assertEqual(agent.prompt_templates, template)
             self.assertEqual(agent.run('question'), {'type': 'number', 'answer': 2})
         self.assertEqual(set(executor.tools), {tool.name for tool in AGENT_TOOLS} | {'final_answer'})
         text = str(model.messages)
-        self.assertNotIn('0.36', text)
-        self.assertIn('reload data and recompute', text)
+        self.assertIn('0.36', text)
+        self.assertIn('reload the data and recompute', text)
         for tool in AGENT_TOOLS:
             self.assertIn(tool.name, text)
             self.assertIn(tool.description, text)
@@ -117,7 +205,7 @@ class RewriteTests(unittest.TestCase):
             (split / 'questions.jsonl').write_text(json.dumps({'id':'q1','business_id':'shop','question':'Q?', 'as_of_date':'2026-01-01'}) + '\n')
             out = root / 'out'
             args = parser().parse_args(['predict', '--split', str(split), '--output', str(out), '--model', 'stub'])
-            with patch('tabular_agent.cli.create_model', return_value=object()), patch('tabular_agent.cli.answer_question', return_value={'type': 'number', 'answer': 2}) as answer:
+            with patch('tabular_agent.cli.create_model', return_value=object()), patch('tabular_agent.cli.answer_with_verification', return_value={'type': 'number', 'answer': 2}) as answer:
                 self.assertEqual(run(args), 0)
             self.assertEqual(json.loads((out / 'submission.jsonl').read_text()), {'id':'q1','type':'number','answer':2})
             self.assertEqual(answer.call_args.args[4], 'Current rules')

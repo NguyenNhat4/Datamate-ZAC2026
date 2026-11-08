@@ -12,17 +12,21 @@ import signal
 import sys
 import time
 
-from .agent import answer_question
+from .agent import answer_with_verification
 from .contracts import read_jsonl
 from .evaluate import score
 from .model import create_model, create_openai_model, openai_model_name
 from .telemetry import tracing
 
 
+class QuestionDeadlineExceeded(BaseException):
+    """Deadline signal that agent-level Exception handlers cannot swallow."""
+
+
 @contextmanager
 def time_limit(seconds):
     def stop(signum, frame):
-        raise TimeoutError('Question deadline exceeded')
+        raise QuestionDeadlineExceeded('Question deadline exceeded')
     previous = signal.signal(signal.SIGALRM, stop)
     signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
@@ -48,9 +52,9 @@ def parser():
         command.add_argument('--seed', type=int, default=42)
         command.add_argument('--business')
         command.add_argument('--question-id', action='append', default=[])
-        command.add_argument('--max-steps', type=int, default=8)
+        command.add_argument('--max-steps', type=int, default=12)
         command.add_argument('--max-tokens', type=int, default=2048)
-        command.add_argument('--question-timeout', type=float, default=180)
+        command.add_argument('--question-timeout', type=float, default=360)
         command.add_argument('--exec-timeout', type=float, default=30)
         command.add_argument('--model-timeout', type=float, default=120)
         command.add_argument('--telemetry', action='store_true', help='Send traces to local Phoenix on port 6006')
@@ -162,8 +166,10 @@ def run(args):
                     events.flush()
                 try:
                     with time_limit(min(args.question_timeout, remaining)):
-                        answer = answer_question(model, question, business, split / 'calendar.csv', rulebook,
+                        answer = answer_with_verification(model, question, business, split / 'calendar.csv', rulebook,
                                                  max_steps=args.max_steps, action_seconds=args.exec_timeout, emit=emit)
+                except QuestionDeadlineExceeded:
+                    answer = {'type': 'abstain', 'reason': 'Question deadline exceeded'}
                 except Exception as error:
                     answer = {'type': 'abstain', 'reason': f'{type(error).__name__}: {error}'}
             row = {'id': question['id'], **answer}

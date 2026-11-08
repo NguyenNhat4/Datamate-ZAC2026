@@ -1,14 +1,31 @@
 """Configure local or OpenAI-hosted smolagents models."""
 from urllib.parse import urlsplit
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
 from dotenv import dotenv_values
 import httpx
 from smolagents import OpenAIModel
+from .contracts import validate_answer
 
 DEFAULT_OPENAI_MODEL = 'gpt-6-luna'
+
+
+def normalize_final_json(content):
+    """Convert an explicit, typed JSON final answer into a CodeAgent action."""
+    if not isinstance(content, str) or '<code>' in content or len(content) > 16000:
+        return content
+    match = re.search(r'(?is)\bfinal\s+answer\s*:\s*```json\s*(\{.*?\})\s*```\s*(?:</code>)?\s*$', content)
+    if not match:
+        return content
+    try:
+        value = json.loads(match.group(1), parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+        answer = validate_answer(value)
+    except (ValueError, TypeError, KeyError):
+        return content
+    return f'Thought: Submit the typed final answer.\n<code>\nfinal_answer({answer!r})\n</code>'
 
 
 class LocalModel(OpenAIModel):
@@ -18,8 +35,10 @@ class LocalModel(OpenAIModel):
         choices = raw.get('choices', []) if isinstance(raw, dict) else getattr(raw, 'choices', [])
         finish = (choices[0].get('finish_reason') if isinstance(choices[0], dict)
                   else getattr(choices[0], 'finish_reason', None)) if choices else None
-        if finish != 'stop':
+        if finish != 'stop' and not (finish == 'tool_calls' and response.tool_calls):
             raise ValueError(f'Incomplete model response ({finish!r}); generated code was not executed')
+        if not kwargs.get('tools_to_call_from'):
+            response.content = normalize_final_json(response.content)
         return response
 
 
