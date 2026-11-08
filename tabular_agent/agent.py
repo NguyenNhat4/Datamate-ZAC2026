@@ -7,7 +7,7 @@ from smolagents.default_tools import FinalAnswerTool
 from smolagents.memory import ActionStep
 from smolagents.agents import ToolOutput
 from smolagents.models import ChatMessage, MessageRole
-from smolagents.utils import AgentGenerationError
+from smolagents.utils import AgentGenerationError, AgentParsingError
 
 from .executor import IsolatedExecutor
 from .tools import AGENT_TOOLS
@@ -130,6 +130,16 @@ class TabularManager(ToolCallingAgent):
     def provide_final_answer(self, task):
         return ChatMessage(role=MessageRole.ASSISTANT,
                            content={'type': 'abstain', 'reason': 'Manager reached its step limit.'})
+
+    def _step_stream(self, memory_step):
+        try:
+            yield from super()._step_stream(memory_step)
+        except AgentGenerationError as error:
+            cause = error.__cause__
+            if isinstance(cause, ValueError) and str(cause).startswith("Incomplete model response ('length')"):
+                raise AgentParsingError('The previous response was truncated and not executed. '
+                                        'Make one concise managed-agent tool call.', self.logger) from error
+            raise
 
     def process_tool_calls(self, chat_message, memory_step):
         # Managed agents share one model and results store. Sequential calls also

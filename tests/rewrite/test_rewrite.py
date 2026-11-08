@@ -13,9 +13,9 @@ from unittest.mock import patch
 import yaml
 
 from smolagents import Model
-from smolagents.models import ChatMessage, MessageRole
+from smolagents.models import ChatMessage, MessageRole, ChatMessageToolCall, ChatMessageToolCallFunction
 from smolagents.local_python_executor import CodeOutput
-from tabular_agent.agent import build_agent, answer_with_verification, TabularManager
+from tabular_agent.agent import build_agent, answer_with_verification, TabularManager, TypedFinalAnswer
 from tabular_agent.cli import parser, run, time_limit, QuestionDeadlineExceeded
 from tabular_agent.contracts import validate_answer
 from tabular_agent.evaluate import match, score
@@ -50,6 +50,26 @@ class RewriteTests(unittest.TestCase):
         manager = TabularManager(tools=[], model=ScriptedModel(), records={})
         template = yaml.safe_load(importlib.resources.files('smolagents.prompts').joinpath('toolcalling_agent.yaml').read_text())
         self.assertEqual(manager.prompt_templates, template)
+
+    def test_manager_retries_truncated_output_without_executing_it(self):
+        class TruncatedThenAbstain(Model):
+            def __init__(self):
+                super().__init__()
+                self.requests = []
+
+            def generate(self, messages, **kwargs):
+                self.requests.append(str(messages))
+                if len(self.requests) == 1:
+                    raise ValueError("Incomplete model response ('length'); generated code was not executed")
+                call = ChatMessageToolCall(function=ChatMessageToolCallFunction(
+                    name='final_answer', arguments={'answer': {'type': 'abstain'}}), id='call', type='function')
+                return ChatMessage(role=MessageRole.ASSISTANT, tool_calls=[call])
+
+        model = TruncatedThenAbstain()
+        manager = TabularManager(tools=[TypedFinalAnswer()], model=model, records={}, max_steps=2, verbosity_level=0)
+        self.assertEqual(manager.run('Synthetic question')['type'], 'abstain')
+        self.assertEqual(len(model.requests), 2)
+        self.assertIn('truncated and not executed', model.requests[1])
 
     def test_distinct_percentage_counts_entities_and_checks_categories(self):
         import pandas as pd
