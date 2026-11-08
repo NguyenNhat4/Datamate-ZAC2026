@@ -7,6 +7,21 @@ import subprocess
 
 
 def create_demo_split(root):
+    """Write a tiny synthetic split for testing a total-sales question.
+
+    Args:
+        root: Path to the demo split directory, created when needed.
+
+    Returns:
+        Path to the created data/example business directory.
+
+    Raises:
+        OSError: A directory or fixture file cannot be written.
+
+    Notes:
+        Writes sales.csv, a business README, rulebook, calendar, questions and
+        reference answers. Existing fixture files at these paths are overwritten.
+    """
     root = Path(root)
     business = root / 'data' / 'example'
     business.mkdir(parents=True, exist_ok=True)
@@ -21,6 +36,16 @@ def create_demo_split(root):
 
 
 def main():
+    """Create timestamped demo inputs and optionally run the local benchmark.
+
+    Returns:
+        Integer exit code 0 after creating inputs under runs/, or the benchmark
+        launcher's exit code when process arguments include --run.
+
+    Raises:
+        OSError: Fixture creation or the local benchmark launcher fails to start.
+        SystemExit: argparse handles help or invalid command-line syntax.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true')
     args = parser.parse_args()

@@ -19,6 +19,23 @@ from .telemetry import is_enabled, record_tool_calls
 class IsolatedExecutor(PythonExecutor):
     def __init__(self, business: Path, calendar: Path, timeout: float = 30, emit=None, reject_repeated=False,
                  as_of_date=None):
+        """Configure a lazy-starting isolated worker for one business.
+
+        Args:
+            business: Business directory to resolve and mount read-only at /data.
+            calendar: Calendar file to resolve and mount at /calendar.csv.
+            timeout: Maximum seconds to wait for each worker response.
+            emit: Optional callback accepting execution event dictionaries.
+            reject_repeated: Reject code identical to the last failed worker action.
+            as_of_date: Optional canonical ISO date restored in worker scope.
+
+        Returns:
+            None. Initializes worker state without launching a process.
+
+        Raises:
+            RuntimeError: bubblewrap is not available on PATH.
+            ValueError: as_of_date is not a valid canonical ISO date.
+        """
         if not shutil.which('bwrap'):
             raise RuntimeError('bubblewrap is required for generated code execution')
         self.business = business.resolve()
@@ -36,15 +53,51 @@ class IsolatedExecutor(PythonExecutor):
         self.failed_action = None
 
     def send_tools(self, tools):
+        """Validate the framework's tools against the worker's registered helpers.
+
+        Args:
+            tools: Mapping from tool names to framework tool instances.
+
+        Returns:
+            None; tools already exist in the worker and are not serialized here.
+
+        Raises:
+            ValueError: Names differ from AGENT_TOOLS plus final_answer, or any
+                registered helper is replaced by a different object.
+        """
         expected = {tool.name: tool for tool in AGENT_TOOLS}
         if set(tools) != set(expected) | {'final_answer'} or any(tools[k] is not v for k, v in expected.items()):
             raise ValueError('Only the registered tools may execute in the worker')
 
     def send_variables(self, variables):
+        """Validate the framework's initial-variable request.
+
+        Args:
+            variables: Mapping of variables the framework wants to transfer.
+
+        Returns:
+            None for an empty mapping; variables are not transferred to the worker.
+
+        Raises:
+            ValueError: The supplied mapping is nonempty.
+        """
         if variables:
             raise ValueError('Initial variables are not supported')
 
     def _start(self):
+        """Launch this executor's worker and wait for its ready message.
+
+        Returns:
+            None. Sets process and scratch directory state; mounts runtime and
+            business inputs read-only, provides writable /tmp, and isolates the
+            worker's network and other namespaces using bubblewrap.
+
+        Raises:
+            OSError: Temporary storage or the subprocess cannot be created.
+            RuntimeError: The worker exits or does not send ready status.
+            TimeoutError: The worker fails to respond before self.timeout.
+            ValueError: The startup protocol is invalid or oversized.
+        """
         self.scratch = tempfile.TemporaryDirectory(prefix='agent-worker-')
         cmd = ['bwrap', '--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL',
                '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'HOME', '/tmp',
@@ -75,6 +128,17 @@ class IsolatedExecutor(PythonExecutor):
             raise RuntimeError('Worker failed to start')
 
     def _read(self):
+        """Read one newline-delimited JSON response from the running worker.
+
+        Returns:
+            Decoded JSON response. Retains bytes after the first newline for the
+            next response; uses self.timeout as the wait limit in seconds.
+
+        Raises:
+            TimeoutError: No complete response arrives within the timeout.
+            RuntimeError: Worker stdout closes before a complete response arrives.
+            ValueError: The buffer exceeds 65,536 bytes or JSON decoding fails.
+        """
         limit = time.monotonic() + self.timeout
         with selectors.DefaultSelector() as selector:
             selector.register(self.process.stdout, selectors.EVENT_READ)
@@ -94,6 +158,25 @@ class IsolatedExecutor(PythonExecutor):
         return json.loads(line)
 
     def __call__(self, code_action):
+        """Execute generated Python, preserving worker variables after success.
+
+        Args:
+            code_action: Python source string to execute in the worker's scope.
+
+        Returns:
+            CodeOutput containing the returned value, bounded logs and final flag.
+            Starts the worker lazily and emits code, timing and observation events.
+
+        Raises:
+            ValueError: Code repeats a rejected failure, the request is too large,
+                or the worker reports an execution or serialization error.
+            RuntimeError: The worker cannot start or exits unexpectedly.
+            TimeoutError: A worker response exceeds the configured timeout.
+
+        Notes:
+            Any failure cleans up the process and discards its variables and table
+            cache. Subsequent calls start fresh and must reload their source data.
+        """
         try:
             if self.reject_repeated and code_action == self.failed_action:
                 raise ValueError('Repeated failed action; repair the error or abstain')
@@ -127,6 +210,13 @@ class IsolatedExecutor(PythonExecutor):
             raise
 
     def cleanup(self):
+        """Terminate the worker and remove its temporary files.
+
+        Returns:
+            None. Kills the running process group, waits, closes protocol streams,
+            removes scratch storage and clears buffered output. Safe to call again
+            after successful cleanup; counters and failed_action are retained.
+        """
         if self.process is not None:
             if self.process.poll() is None:
                 os.killpg(self.process.pid, signal.SIGKILL)

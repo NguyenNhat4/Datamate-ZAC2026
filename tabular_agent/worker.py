@@ -20,15 +20,44 @@ from tools import AGENT_TOOLS
 
 class FinalAnswer(BaseException):
     def __init__(self, value):
+        """Store the candidate payload for the worker's final-answer control signal.
+
+        Args:
+            value: Candidate answer; JSON serializability is checked by the worker.
+
+        Returns:
+            None. Stores value without validating or copying it.
+        """
         self.value = value
 
 
 class ObserveFirst(BaseException):
     def __init__(self, value):
+        """Store an answer candidate that must wait for a separate review step.
+
+        Args:
+            value: Candidate produced in the same action as the first full read.
+
+        Returns:
+            None. Stores value for the worker to expose as a nonfinal output.
+        """
         self.value = value
 
 
 def encode_decimal(value):
+    """Convert a Decimal to a JSON number only when its value can be preserved.
+
+    Args:
+        value: Object passed to json.dumps as its fallback encoder.
+
+    Returns:
+        int for an integral Decimal, otherwise a float whose string conversion
+        reproduces the Decimal value.
+
+    Raises:
+        TypeError: The object is not a Decimal.
+        ValueError: The Decimal is nonfinite or float conversion loses value.
+    """
     if not isinstance(value, Decimal):
         raise TypeError(f'Object of type {type(value).__name__} is not JSON serializable')
     if not value.is_finite():
@@ -42,17 +71,43 @@ def encode_decimal(value):
 
 
 def final_answer(value):
+    """Stop generated execution with a candidate final answer.
+
+    Args:
+        value: Answer payload to hand to the worker's protocol handler.
+
+    Raises:
+        FinalAnswer: Always raised with value; this function does not return.
+            The parent process validates the typed output separately.
+    """
     raise FinalAnswer(value)
 
 
 class BoundedLog(io.StringIO):
     def write(self, value):
+        """Append text without growing the captured log past 8,000 characters.
+
+        Args:
+            value: Text to write at the buffer's current position.
+
+        Returns:
+            Original text length, even when some characters were discarded.
+        """
         super().write(value[:max(0, 8000 - self.tell())])
         return len(value)
 
 
 def describe(value, depth=0):
-    """Keep traces small and retain DataFrames in the worker."""
+    """Produce a bounded trace description without serializing entire DataFrames.
+
+    Args:
+        value: Arbitrary tool argument or return value to describe.
+        depth: Current recursion depth; containers stop expanding at depth three.
+
+    Returns:
+        String with truncated scalar representations, up to five container
+        entries per level, or pandas object type and shape. Leaves value intact.
+    """
     if value is None or isinstance(value, (bool, int, float, str)):
         return repr(value)[:300]
     if depth >= 3:
@@ -68,7 +123,16 @@ def describe(value, depth=0):
 
 
 def report_categories(frame):
-    """Report bounded categorical values from a full read, not guesses from a preview."""
+    """Print bounded observed text categories after a complete table read.
+
+    Args:
+        frame: Read result; objects other than a DataFrame are ignored.
+
+    Returns:
+        None. Prints up to 4,000 characters describing qualifying columns among
+        the first 40, each with at most 12 observed values and a missing count.
+        Does not mutate the table; printed values may contain business data.
+    """
     import pandas as pd
     if not isinstance(frame, pd.DataFrame):
         return
@@ -89,7 +153,23 @@ def report_categories(frame):
 
 
 def checked_equal(left, right):
-    """Flag a missing categorical literal when a closely related value exists."""
+    """Evaluate equality and flag some suspicious empty categorical/date matches.
+
+    Args:
+        left: Left operand, usually a pandas Series or scalar.
+        right: Right operand, usually the other Series or comparison literal.
+
+    Returns:
+        The original equality result, usually a boolean Series.
+
+    Raises:
+        ValueError: An empty comparison suggests incompatible date formats or
+            types, or a low-cardinality category contains a close word match.
+
+    Notes:
+        These are heuristics. Intentional exact empty matches can use Series.eq
+        after source inspection; this check does not establish answer accuracy.
+    """
     import pandas as pd
     series, literal = (left, right) if isinstance(left, pd.Series) else (right, left)
     result = left == right
@@ -117,6 +197,14 @@ def checked_equal(left, right):
     if len(values) > 12 or not all(isinstance(value, str) for value in values):
         return result
     def words(value):
+        """Convert a text label to a set of lowercase words without combining marks.
+
+        Args:
+            value: String label to casefold and normalize with NFKD.
+
+        Returns:
+            Set of whitespace-separated words used for near-match detection.
+        """
         value = unicodedata.normalize('NFKD', value.casefold())
         return set(''.join(char for char in value if not unicodedata.combining(char)).split())
     query = words(literal)
@@ -129,7 +217,21 @@ def checked_equal(left, right):
 
 
 def checked_order(left, right, operation):
-    """Reject comparisons that would lexically order day-first date strings."""
+    """Evaluate an ordered comparison after checking for day-first date text.
+
+    Args:
+        left: Left scalar or pandas Series operand.
+        right: Right scalar or pandas Series operand.
+        operation: Operator key: lt, le, gt or ge.
+
+    Returns:
+        The selected operator's scalar or elementwise comparison result.
+
+    Raises:
+        ValueError: Sampled Series values use day/month/year text and a date
+            literal would be compared lexically instead of chronologically.
+        KeyError: operation is unsupported.
+    """
     import pandas as pd
     import operator
     series, literal = (left, right) if isinstance(left, pd.Series) and isinstance(right, str) else (right, left)
@@ -143,7 +245,20 @@ def checked_order(left, right, operation):
 
 
 def checked_row_count(value):
-    """Flag ambiguous row counts when a table has repeated identifier values."""
+    """Return a length after checking for ambiguous entity counts in tables.
+
+    Args:
+        value: Sized object; DataFrames receive identifier-column checks.
+
+    Returns:
+        len(value) when no repeated values are found in recognizable identifier
+        columns, or when value is not a DataFrame.
+
+    Raises:
+        ValueError: A recognizable identifier column has duplicate nonnull
+            values, requiring an explicit entity or row count decision.
+        TypeError: value has no length.
+    """
     import pandas as pd
     if isinstance(value, pd.DataFrame):
         for name in value.columns:
@@ -164,10 +279,32 @@ def checked_row_count(value):
 
 
 def compile_action(code):
-    """Show bare inspection calls as a notebook would, without evaluating twice."""
+    """Compile generated Python with inspection and counting/comparison guards.
+
+    Args:
+        code: Python source string for one worker action.
+
+    Returns:
+        Executable code object whose AST redirects len, shape[0], nunique,
+        equality and selected string ordering comparisons to worker guards.
+        Bare list_files, inspect_table and profile_columns calls print their
+        results once. Compilation itself does not execute the action.
+
+    Raises:
+        SyntaxError: The action is not valid Python.
+    """
     tree = ast.parse(code, filename='<agent>', mode='exec')
     class ShowInspections(ast.NodeTransformer):
         def visit_Call(self, node):
+            """Redirect calls that count rows or distinct values through worker guards.
+
+            Args:
+                node: ast.Call visited after recursively transforming its children.
+
+            Returns:
+                Replacement Call for single-argument len or .nunique; otherwise the
+                original node with its transformed children.
+            """
             self.generic_visit(node)
             if isinstance(node.func, ast.Name) and node.func.id == 'len' and len(node.args) == 1 and not node.keywords:
                 return ast.copy_location(ast.Call(func=ast.Name(id='_checked_row_count', ctx=ast.Load()),
@@ -178,6 +315,14 @@ def compile_action(code):
             return node
 
         def visit_Subscript(self, node):
+            """Route a loaded shape[0] expression through the row-count guard.
+
+            Args:
+                node: ast.Subscript whose children are transformed in place first.
+
+            Returns:
+                Guard-call AST for a matching expression, otherwise the visited node.
+            """
             self.generic_visit(node)
             if (isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Attribute)
                     and node.value.attr == 'shape' and isinstance(node.slice, ast.Constant)
@@ -187,6 +332,15 @@ def compile_action(code):
             return node
 
         def visit_Compare(self, node):
+            """Insert guards for equality and selected string ordering comparisons.
+
+            Args:
+                node: ast.Compare whose operands are recursively transformed first.
+
+            Returns:
+                A checked comparison Call for eligible single comparisons, otherwise
+                the visited node. Chained comparisons retain their existing behavior.
+            """
             self.generic_visit(node)
             order_ops = {ast.Lt: 'lt', ast.LtE: 'le', ast.Gt: 'gt', ast.GtE: 'ge'}
             if (len(node.ops) == 1 and type(node.ops[0]) in order_ops
@@ -201,6 +355,15 @@ def compile_action(code):
             return node
 
         def visit_Expr(self, node):
+            """Display bare inspection helper results without evaluating the call twice.
+
+            Args:
+                node: ast.Expr whose children are recursively transformed first.
+
+            Returns:
+                Expression wrapping eligible inspection calls in _show_inspection,
+                otherwise the visited node.
+            """
             self.generic_visit(node)
             call = node.value
             if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
@@ -213,6 +376,20 @@ def compile_action(code):
 
 
 def main():
+    """Serve newline-delimited execution requests inside the isolated process.
+
+    Returns:
+        None when stdin reaches EOF. Applies memory, file, descriptor, process
+        and CPU limits; initializes persistent tool/Python scope; writes a ready
+        message and one JSON response per request on the original stdout.
+
+    Notes:
+        Requests contain code and optional trace_tools/as_of_date. Responses
+        contain status, bounded logs, output, final, tool_calls and measurements,
+        or an error. Generated output is captured separately. Action failures
+        are reported to the parent, which is responsible for resetting the
+        worker. Setup errors propagate and terminate the process.
+    """
     resource.setrlimit(resource.RLIMIT_AS, (2 * 1024**3, 2 * 1024**3))
     resource.setrlimit(resource.RLIMIT_FSIZE, (1024**2, 1024**2))
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
@@ -228,7 +405,30 @@ def main():
     reads = {'current': False, 'previous': False}
 
     def bind(tool):
+        """Wrap a registered tool with per-worker caching and observations.
+
+        Args:
+            tool: Registered smolagents tool with name and forward attributes.
+
+        Returns:
+            Callable forwarding tool arguments while tracking timing, optional
+            trace summaries and full-read state in the enclosing worker.
+        """
         def call(*args, **kwargs):
+            """Execute the bound helper and record bounded timing/trace information.
+
+            Args:
+                *args: Positional arguments passed to the captured tool's forward.
+                **kwargs: Keyword arguments passed to the captured tool's forward.
+
+            Returns:
+                Tool result; repeated table/workbook reads return independent deep
+                copies from cache. Full reads print categories and update read state.
+
+            Raises:
+                Exception: Tool failures are recorded when tracing, then re-raised.
+                    Timing is recorded on either success or failure.
+            """
             started = time.monotonic()
             cache_hit = False
             item = None
@@ -268,7 +468,31 @@ def main():
     scope = {tool.name: bind(tool) for tool in AGENT_TOOLS}
     import pandas as pd
     def checked_nunique(value, *args, **kwargs):
+        """Count unique values after checking recognizable order eligibility.
+
+        Args:
+            value: Object exposing nunique; recognizable order-id Series receive
+                status checks against a matching selected DataFrame in worker scope.
+            *args: Positional arguments forwarded to value.nunique.
+            **kwargs: Keyword arguments forwarded to value.nunique.
+
+        Returns:
+            The original nunique result when applicable status checks pass.
+
+        Raises:
+            ValueError: A matched order table has flagged statuses or missing ids.
+                Other errors from nunique propagate unchanged.
+        """
         def normalized(text):
+            """Normalize a column label for order/status-name heuristics.
+
+            Args:
+                text: Label converted to text, casefolded and stripped of combining
+                    marks; Vietnamese crossed d and underscores are also normalized.
+
+            Returns:
+                String used to recognize order identifiers and status columns.
+            """
             text = str(text).casefold().replace('đ', 'd')
             return ''.join(c for c in unicodedata.normalize('NFKD', text)
                            if not unicodedata.combining(c)).replace('_', ' ')
@@ -286,9 +510,32 @@ def main():
                         break
         return value.nunique(*args, **kwargs)
     def show_inspection(value):
+        """Print a bounded representation of a bare inspection result.
+
+        Args:
+            value: Helper result to display in the current action's observations.
+
+        Returns:
+            None. Prints at most 6,000 representation characters plus a newline.
+        """
         print(repr(value)[:6000])
 
     def observed_final_answer(value):
+        """Submit a candidate only after the worker's source-observation checks.
+
+        Args:
+            value: Candidate typed answer passed by generated Python.
+
+        Raises:
+            ValueError: unanswerable is proposed without any complete source read.
+            ObserveFirst: The first full read occurred in this same action and
+                the candidate is not an abstention; the next step must review it.
+            FinalAnswer: The candidate is ready for the parent to validate.
+
+        Notes:
+            Never returns normally. A full read or review step alone does not
+            establish semantic correctness or complete coverage of relevant sources.
+        """
         if (isinstance(value, dict) and value.get('type') == 'unanswerable'
                 and not reads['current'] and not reads['previous']):
             raise ValueError('A preview cannot establish that information is absent. '

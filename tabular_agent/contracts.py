@@ -6,6 +6,19 @@ import re
 
 
 def read_jsonl(path):
+    """Read UTF-8 JSON Lines records with unique string identifiers.
+
+    Args:
+        path: Filesystem path to a JSONL file; blank lines are ignored.
+
+    Returns:
+        List of dictionaries in file order, each with a unique string id.
+
+    Raises:
+        OSError: The file cannot be opened or read.
+        ValueError: JSON is invalid, contains nonstandard numeric constants,
+            or a record is not an object with a unique string id.
+    """
     result, seen = [], set()
     with open(path, encoding='utf-8') as stream:
         for line in stream:
@@ -20,6 +33,22 @@ def read_jsonl(path):
 
 
 def validate_answer(answer):
+    """Check a typed answer and return its submission fields.
+
+    Args:
+        answer: Dictionary with type and answer, or type and optional reason
+            for abstain/unanswerable. Numbers must be finite; booleans are
+            not numbers. Lists and table cells accept strings or numbers.
+
+    Returns:
+        New dictionary containing type and answer, or type and a string
+        reason (defaulting to empty). Extra fields, including id, are removed;
+        nested answer values are reused rather than copied.
+
+    Raises:
+        ValueError: The dictionary, declared type, date, reason or value is
+            invalid. Table rows must match the nonempty columns list's width.
+    """
     if not isinstance(answer, dict):
         raise ValueError('Expected an answer dictionary')
     kind = answer.get('type')

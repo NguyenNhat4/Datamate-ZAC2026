@@ -47,6 +47,14 @@ class TabularCodeAgent(CodeAgent):
     def provide_final_answer(self, task):
         # The agent has exhausted its execution budget; an ungrounded extra model
         # call cannot execute code and can exceed the model's context window.
+        """Return an abstention when the agent exhausts its execution steps.
+
+        Args:
+            task: Framework task text; unused because no extra model call is made.
+
+        Returns:
+            Assistant ChatMessage containing a typed abstention and its reason.
+        """
         return ChatMessage(role=MessageRole.ASSISTANT,
                            content={'type': 'abstain', 'reason': 'Unable to obtain a validated answer within the step limit.'})
 
@@ -57,6 +65,18 @@ class RepairLimitReached(BaseException):
 
 class SingleTabularAgent(TabularCodeAgent):
     def _step_stream(self, memory_step):
+        """Stream one agent step and make truncated generations repairable.
+
+        Args:
+            memory_step: Framework action-memory entry for the current step.
+
+        Yields:
+            Events produced by the parent CodeAgent step implementation.
+
+        Raises:
+            AgentParsingError: A generation failed because its response was truncated.
+            AgentGenerationError: Another model-generation failure occurred.
+        """
         try:
             yield from super()._step_stream(memory_step)
         except AgentGenerationError as error:
@@ -67,12 +87,41 @@ class SingleTabularAgent(TabularCodeAgent):
 
 
 def source_preview(business, calendar, timeout, *, preview_rows=1):
-    """Collect a bounded schema preview inside the same read-only worker sandbox."""
+    """Collect a bounded source preview in a temporary isolated worker.
+
+    Args:
+        business: Path to the business directory mounted read-only as /data.
+        calendar: Path to the split calendar mounted as /calendar.csv.
+        timeout: Maximum seconds to wait for each worker response.
+        preview_rows: Rows to display per preview; values above one are capped
+            at eight. Inspections themselves read at most eight sample rows.
+
+    Returns:
+        At most 6,000 characters of logs describing up to eight files and two
+        sheets or tables per file. This is not a complete source read.
+
+    Raises:
+        RuntimeError: The isolated worker cannot start or exits unexpectedly.
+        TimeoutError: The worker does not respond before the timeout.
+        ValueError: Execution or the worker protocol fails.
+
+    Notes:
+        Always cleans up the preview worker, including after a failure.
+    """
     executor = IsolatedExecutor(business, calendar, timeout=timeout)
     code = '''
 files = list_files()
 print('Files:', files[:8])
 def summary(info):
+    """Bound preview rows while retaining file metadata.
+
+    Args:
+        info: Metadata dictionary returned by inspect_table.
+
+    Returns:
+        New dictionary with rows replaced by first_row_only, containing at most
+        one row. The enclosing preview builder can expand that bound to eight.
+    """
     out = {key: value for key, value in info.items() if key not in ('rows',)}
     if 'rows' in info:
         out['first_row_only'] = info['rows'][:1]
@@ -102,16 +151,62 @@ for item in files[:8]:
 
 def build_agent(model, business: Path, calendar: Path, *, max_steps=4, action_seconds=30, emit=None, limit_repairs=True,
                 as_of_date=None):
+    """Construct a fresh single agent and its isolated Python executor.
+
+    Args:
+        model: Configured smolagents model used for generation.
+        business: Business data directory to mount read-only.
+        calendar: Current split's calendar file to mount read-only.
+        max_steps: Maximum number of agent execution steps.
+        action_seconds: Timeout in seconds for each worker response.
+        emit: Optional callback accepting event dictionaries for local logs.
+        limit_repairs: Reject repeated failed code and stop after a second
+            failed step when true.
+        as_of_date: Optional ISO reference date restored in each worker action.
+
+    Returns:
+        A (SingleTabularAgent, IsolatedExecutor) pair. The caller must clean
+        up the executor after using the agent.
+
+    Raises:
+        RuntimeError: bubblewrap is unavailable.
+        ValueError: A supplied reference date is invalid.
+    """
     executor = IsolatedExecutor(business, calendar, timeout=action_seconds, emit=emit, reject_repeated=limit_repairs,
                                 as_of_date=as_of_date)
 
     def check_answer(answer, memory, agent):
+        """Validate the final answer for the framework's acceptance hook.
+
+        Args:
+            answer: Candidate typed answer dictionary.
+            memory: Framework memory supplied by the hook; unused.
+            agent: Calling agent supplied by the hook; unused.
+
+        Returns:
+            True if the answer satisfies the output contract.
+
+        Raises:
+            ValueError: The answer's type or value is invalid.
+        """
         validate_answer(answer)
         return True
 
     failures = [0]
     record = memory_callback(emit)
     def on_step(step, agent):
+        """Record a completed step and enforce this agent's repair budget.
+
+        Args:
+            step: Framework action step, including its optional error.
+            agent: Agent whose memory and step are being recorded.
+
+        Returns:
+            None. Emits a memory event and increments the captured failure count.
+
+        Raises:
+            RepairLimitReached: Repair limiting is enabled and a second step fails.
+        """
         record(step, agent)
         if limit_repairs and step.error is not None:
             failures[0] += 1
@@ -134,6 +229,33 @@ def build_agent(model, business: Path, calendar: Path, *, max_steps=4, action_se
 
 def answer_question(model, question: dict, business: Path, calendar: Path, rulebook: str,
                     *, max_steps=4, action_seconds=30, emit=None, source_summary=None):
+    """Solve one question using fresh agent memory and an isolated worker.
+
+    Args:
+        model: Configured model used by the agent.
+        question: Mapping containing question text and ISO as_of_date; id and
+            business_id are used by optional tracing for association.
+        business: Directory containing this business's source files and README.
+        calendar: Calendar file for the current split.
+        rulebook: Current split's business rules as text.
+        max_steps: Maximum number of agent execution steps.
+        action_seconds: Timeout in seconds for each worker response.
+        emit: Optional callback receiving code, observation, timing and memory
+            event dictionaries, which can contain business data.
+        source_summary: Optional bounded preview text to include in context.
+
+    Returns:
+        Validated dictionary containing type and answer, or type and reason.
+        Exhausting the repair budget returns a typed abstention.
+
+    Raises:
+        ValueError: The final answer or configured inputs are invalid.
+        OSError: Business instructions cannot be read.
+
+    Notes:
+        Other model or worker failures propagate to the caller. The executor
+        is always cleaned up; reference answers are not read here.
+    """
     readme = business / 'README.md'
     context = {
         'rulebook': rulebook,

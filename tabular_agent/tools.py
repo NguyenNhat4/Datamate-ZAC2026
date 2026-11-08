@@ -9,6 +9,19 @@ from smolagents import tool
 
 
 def _source(name: str) -> Path:
+    """Resolve a file alias or relative name within the worker's business mount.
+
+    Args:
+        name: One-based alias such as F1, or a path inside /data. Aliases use
+            sorted supported data-file paths, matching list_files.
+
+    Returns:
+        Path to an existing nonsymlink file whose resolved location is in /data.
+
+    Raises:
+        ValueError: The alias is unknown, the file is absent, or path resolution
+            escapes the business directory or selects a symlink.
+    """
     root = Path('/data')
     aliases = sorted(p for p in root.rglob('*') if p.is_file() and p.suffix.lower() in {'.csv', '.xlsx', '.sqlite', '.sqlite3', '.db'})
     if name.startswith('F') and name[1:].isdigit():
@@ -25,7 +38,13 @@ def _source(name: str) -> Path:
 
 @tool
 def list_files() -> list:
-    """List available business data files and their aliases."""
+    """List available business data files and their aliases.
+
+    Returns:
+        Sorted list of dictionaries with alias (F1, F2, ...) and relative name
+        for CSV, XLSX, SQLite, sqlite3 and db files under /data. No arguments
+        are required; no file contents are read.
+    """
     root = Path('/data')
     files = sorted(p for p in root.rglob('*') if p.is_file() and p.suffix.lower() in {'.csv', '.xlsx', '.sqlite', '.sqlite3', '.db'})
     return [{'alias': f'F{i}', 'name': str(p.relative_to(root))} for i, p in enumerate(files, 1)]
@@ -39,6 +58,18 @@ def inspect_table(name: str, sheet: str | None = None, table: str | None = None)
         name: File alias such as F1 or relative filename.
         sheet: Excel sheet name; omit to list sheets.
         table: SQLite table name; omit to list tables.
+
+    Returns:
+        Metadata dictionary: sheets or tables when no selection is supplied;
+        otherwise rows (up to eight for CSV/Excel, five for SQLite), plus the
+        CSV delimiter, Excel sheet name or SQLite columns as applicable.
+
+    Raises:
+        ValueError: The file or selected sheet/table is unavailable or unsafe.
+        csv.Error: A CSV delimiter cannot be inferred from the initial sample.
+
+    Notes:
+        Reads source data without modifying it. Library/file errors propagate.
     """
     path = _source(name)
     if path.suffix.lower() == '.xlsx':
@@ -83,6 +114,15 @@ def read_table(name: str, sheet: str | None = None, table: str | None = None,
         table: SQLite table name.
         header_row: Zero-based header row for CSV or Excel.
         delimiter: CSV delimiter; auto-detect if omitted.
+
+    Returns:
+        Complete pandas DataFrame. CSV/Excel use dtype=object to preserve
+        source values; SQLite uses pandas' inferred types. Dates and formatted
+        numbers may need explicit parsing. Does not modify source files.
+
+    Raises:
+        ValueError: A source/selection is invalid, or a workbook has multiple
+            sheets without an explicit selection. Parser/file errors propagate.
     """
     import pandas as pd
     path = _source(name)
@@ -112,6 +152,17 @@ def read_workbook(name: str, header_row: int = 0) -> Any:
     Args:
         name: XLSX file alias or relative filename.
         header_row: Zero-based header row.
+
+    Returns:
+        pandas DataFrame combining sheets in workbook order, with a fresh
+        integer index and __sheet labels. Different columns align by name.
+
+    Raises:
+        ValueError: A sheet already contains the reserved __sheet column.
+        KeyError: The selected source is not an Excel workbook.
+
+    Notes:
+        Reads every sheet without modifying the workbook; read errors propagate.
     """
     import pandas as pd
     sheets = inspect_table.forward(name)['sheets']
@@ -133,12 +184,33 @@ def parse_numbers(values: Any, decimal_separator: str, thousands_separator: str)
         values: Values to parse.
         decimal_separator: Decimal character, for example comma or period.
         thousands_separator: Thousands character, or empty string if absent.
+
+    Returns:
+        pandas Series of Decimal values, preserving an input Series index.
+        Missing or blank values become None; numeric scalars are converted
+        through their string representation. Input values are not mutated.
+
+    Raises:
+        ValueError: Separators are invalid, or text has invalid numeric syntax
+            or thousands grouping. Decimal conversion errors also propagate.
     """
     from decimal import Decimal
     import pandas as pd
     if decimal_separator not in ('.', ',') or thousands_separator not in ('', '.', ',', ' ') or decimal_separator == thousands_separator:
         raise ValueError('Invalid separators')
     def parse(value):
+        """Parse one value using the enclosing call's explicit numeric separators.
+
+        Args:
+            value: Numeric scalar or formatted text; missing/blank values are allowed.
+
+        Returns:
+            Decimal for a valid number, or None for a missing/blank value.
+
+        Raises:
+            ValueError: Decimal syntax or thousands grouping does not match the
+                selected separators. Decimal conversion errors also propagate.
+        """
         if pd.isna(value) or str(value).strip() == '':
             return None
         if isinstance(value, (int, float, Decimal)):
@@ -170,6 +242,13 @@ def parse_dates(values: Any, date_format: str) -> Any:
     Args:
         values: A pandas Series or list of dates.
         date_format: Python date format, for example %d/%m/%Y or %Y-%m-%d.
+
+    Returns:
+        pandas datetime Series with the input Series index preserved. Missing
+        and blank values become NaT; the input is not modified.
+
+    Raises:
+        ValueError: A nonempty date cannot be parsed using date_format.
     """
     import pandas as pd
     series = pd.Series(values)
@@ -183,6 +262,14 @@ def profile_columns(frame: Any, columns: list[str]) -> dict:
     Args:
         frame: DataFrame returned by read_table or read_workbook.
         columns: Actual column names to summarize.
+
+    Returns:
+        Dictionary keyed by column name, containing rows, nulls, distinct
+        nonnull text representations, up to 12 frequent_values with counts,
+        and a truncated flag. Displayed values are capped at 160 characters.
+
+    Raises:
+        ValueError: frame is not a DataFrame or a requested column is missing.
     """
     import pandas as pd
     if not isinstance(frame, pd.DataFrame):
@@ -213,6 +300,16 @@ def distinct_percentage(frame: Any, id_column: str, category_column: str,
         category_column: Column containing the category for each entity.
         selected_values: Exact category values observed in the data to count.
         allow_absent: Set true only after confirming that an absent category legitimately means zero in this period.
+
+    Returns:
+        Unrounded percentage in units from 0 to 100: matching distinct IDs
+        divided by all distinct IDs in frame, multiplied by 100. Does not
+        filter dates, round the result or modify the input.
+
+    Raises:
+        ValueError: Input/columns/categories are invalid, IDs are missing,
+            an entity has conflicting or unknown categories, a selected label
+            is absent without permission, or the denominator is zero.
     """
     import pandas as pd
     if not isinstance(frame, pd.DataFrame):
@@ -250,6 +347,14 @@ def date_window(as_of_date: str, period: str) -> dict:
     Args:
         as_of_date: Reference date in ISO format.
         period: One of today, yesterday, this_week, last_week, this_month, previous_month_comparable, or year_to_date.
+
+    Returns:
+        Dictionary with ISO start/end strings and inclusive=True. Weeks begin
+        Monday; current periods end at as_of_date. previous_month_comparable
+        ends at the matching day capped to the previous month's length.
+
+    Raises:
+        ValueError: as_of_date is invalid or period is unsupported.
     """
     from datetime import date, timedelta
     import calendar
@@ -278,6 +383,15 @@ def filter_categories(frame: Any, column: str, values: list[Any], allow_absent: 
         column: Actual category column name.
         values: Exact values to include, using the same types as the column.
         allow_absent: True only after checking an absent category is valid.
+
+    Returns:
+        Independent DataFrame copy containing rows whose column values match
+        values exactly, preserving their index. Prints before/after row counts.
+
+    Raises:
+        ValueError: values is empty, or requested labels are absent without
+            allow_absent. Flags recognizable ISO/day-first date mismatches.
+        KeyError: The selected column does not exist.
     """
     if not values:
         raise ValueError('Supply one or more exact values')
@@ -307,9 +421,30 @@ def count_entities(frame: Any, id_column: str, allow_flagged_order_status: bool 
         frame: DataFrame containing the selected entities.
         id_column: Column identifying the entity.
         allow_flagged_order_status: Set true only if the question or rulebook requires the flagged statuses.
+
+    Returns:
+        Integer count of distinct IDs, including zero for an empty selection.
+        Prints row and entity counts without modifying frame.
+
+    Raises:
+        ValueError: IDs are missing/blank, or recognizable order identifiers
+            coexist with cancelled/returned status labels without permission.
+        KeyError: id_column is absent.
+
+    Notes:
+        Status detection is heuristic; it does not apply all rulebook policies.
     """
     import unicodedata
     def normalize(value):
+        """Normalize a column name or status label for eligibility heuristics.
+
+        Args:
+            value: Label converted to text, casefolded and normalized with NFKD.
+
+        Returns:
+            Text with combining marks removed, crossed d mapped to d, punctuation
+            replaced by spaces and whitespace collapsed.
+        """
         value = unicodedata.normalize('NFKD', str(value).casefold().replace('đ', 'd'))
         return ' '.join(''.join(c if c.isalnum() else ' ' for c in value if not unicodedata.combining(c)).split())
     identifier = normalize(id_column)
@@ -349,6 +484,22 @@ def count_orders(frame: Any, id_column: str, date_column: str, status_column: st
         end_date: Inclusive ISO end date.
         date_format: Explicit source date format, for example %d/%m/%Y.
         exclude_cancelled_and_returned: True when the applicable rule requires excluding cancelled and returned orders.
+
+    Returns:
+        Integer count of distinct orders after inclusive timestamp filtering.
+        Rows with missing/blank IDs are dropped. When exclusions are enabled,
+        any cancellation/return label in the selected period excludes that
+        entire order ID. Prints observed statuses and exclusion/count details.
+
+    Raises:
+        ValueError: Eligibility is not a boolean, columns/dates are invalid,
+            retained rows have missing dates, the period is outside observed
+            coverage, or exclusions encounter missing/ambiguous status labels.
+
+    Notes:
+        Does not infer the correct eligibility policy or guarantee full period
+        coverage. Boundaries are midnight timestamps; parse or normalize source
+        timestamps appropriately. Does not mutate the input DataFrame.
     """
     from datetime import date
     import unicodedata
@@ -374,6 +525,15 @@ def count_orders(frame: Any, id_column: str, date_column: str, status_column: st
     if exclude_cancelled_and_returned and (rows[status_column].isna().any() or rows[status_column].astype(str).str.strip().eq('').any()):
         raise ValueError('Some selected orders have missing status; resolve eligibility before counting')
     def normalize(value):
+        """Normalize an observed order status before cancellation/return matching.
+
+        Args:
+            value: Status converted to text, casefolded and normalized with NFKD.
+
+        Returns:
+            Text with combining marks removed, crossed d mapped to d, punctuation
+            replaced by spaces and whitespace collapsed.
+        """
         value = unicodedata.normalize('NFKD', str(value).casefold().replace('đ', 'd'))
         return ' '.join(''.join(c if c.isalnum() else ' ' for c in value if not unicodedata.combining(c)).split())
     statuses = rows[status_column].fillna('').map(normalize)
@@ -397,6 +557,15 @@ def checked_join(left: Any, right: Any, on: str, cardinality: str, how: str = 'l
         on: Shared join column.
         cardinality: One of one_to_one, one_to_many, many_to_one, or many_to_many.
         how: Join type: left, right, inner, or outer.
+
+    Returns:
+        New pandas DataFrame from merge, with cardinality validated. Prints
+        input/output sizes and counts of rows with unmatched keys.
+
+    Raises:
+        ValueError: Join mode/cardinality is unsupported or a join key is null.
+        KeyError: The join column is absent.
+        pandas.errors.MergeError: Key multiplicities violate cardinality.
     """
     import pandas as pd
     if cardinality not in {'one_to_one', 'one_to_many', 'many_to_one', 'many_to_many'} or how not in {'left', 'right', 'inner', 'outer'}:
@@ -418,6 +587,15 @@ def round_decimal(value: Any, places: int, mode: str = 'half_up') -> Any:
         value: Numeric value to round.
         places: Number of decimal places from 0 to 6.
         mode: Rounding mode: half_up or half_even.
+
+    Returns:
+        Decimal quantized to places decimal positions using the chosen mode.
+        Convert it explicitly if a caller requires a JSON-native scalar.
+
+    Raises:
+        ValueError: places/mode is invalid or the number is nonfinite.
+        decimal.InvalidOperation: value cannot be parsed or quantized under
+            the active Decimal context.
     """
     from decimal import Decimal, ROUND_HALF_UP, ROUND_HALF_EVEN
     if type(places) is not int or not 0 <= places <= 6 or mode not in {'half_up', 'half_even'}:

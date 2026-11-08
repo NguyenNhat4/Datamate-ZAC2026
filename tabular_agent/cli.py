@@ -27,7 +27,33 @@ class QuestionDeadlineExceeded(BaseException):
 
 @contextmanager
 def time_limit(seconds):
+    """Apply a wall-clock alarm to a block running on the main thread.
+
+    Args:
+        seconds: Alarm delay in seconds; zero disables the timer.
+
+    Yields:
+        None while the calling block executes.
+
+    Raises:
+        QuestionDeadlineExceeded: SIGALRM fires before the block finishes.
+        ValueError: Signal setup is attempted outside the main thread or the
+            timer delay is invalid.
+
+    Notes:
+        Cancels the timer and restores the previous signal handler on exit.
+        A pre-existing timer schedule is not restored.
+    """
     def stop(signum, frame):
+        """Interrupt the active question when the alarm signal arrives.
+
+        Args:
+            signum: Signal number supplied by Python; unused.
+            frame: Interrupted execution frame supplied by Python; unused.
+
+        Raises:
+            QuestionDeadlineExceeded: Always raised; no value is returned.
+        """
         raise QuestionDeadlineExceeded('Question deadline exceeded')
     previous = signal.signal(signal.SIGALRM, stop)
     signal.setitimer(signal.ITIMER_REAL, seconds)
@@ -39,6 +65,12 @@ def time_limit(seconds):
 
 
 def parser():
+    """Build the command-line interface without parsing arguments.
+
+    Returns:
+        ArgumentParser defining bench, predict, doctor and score subcommands,
+        including provider, data selection, timing and output settings.
+    """
     parser = argparse.ArgumentParser(description='Local tabular CodeAgent')
     commands = parser.add_subparsers(dest='command', required=True)
     for name in ('bench', 'predict', 'doctor'):
@@ -75,6 +107,25 @@ def parser():
 
 
 def select_questions(questions, args):
+    """Validate, filter and reproducibly sample question records.
+
+    Args:
+        questions: Question dictionaries containing id, business_id, question
+            text and canonical ISO as_of_date.
+        args: Parsed CLI namespace with business, question_id, partition,
+            partition_seed, limit, seed and sample options. A zero limit
+            selects all filtered questions.
+
+    Returns:
+        List of original question dictionaries. Business partitions use a
+        seeded hash with 60/20/20 buckets; limited sampling is random or
+        round-robin balanced across businesses. Does not mutate the input list.
+
+    Raises:
+        ValueError: A business id is unsafe, or a retained question has invalid
+            text or reference date.
+        KeyError: Required question fields are absent.
+    """
     import hashlib
     filtered = []
     for q in questions:
@@ -116,6 +167,32 @@ def select_questions(questions, args):
 
 
 def run(args):
+    """Execute a configured inference, benchmark or configuration-check command.
+
+    Args:
+        args: Namespace produced by parser for bench, predict or doctor;
+            includes model/provider, input split, output path, sampling and
+            time/step/token limits.
+
+    Returns:
+        Integer exit code 0 on success. Doctor configures the client without
+        making an inference request. Other commands write selected questions,
+        manifest, flushed submissions, per-question logs and timings; bench
+        reads references only after inference and also writes an internal score.
+
+    Raises:
+        ValueError: Configuration, selected data, paths or output directory are
+            invalid. Existing nonempty run directories are rejected.
+        OSError: Input or output files cannot be accessed.
+        RuntimeError: Provider or infrastructure setup fails outside the
+            per-question error handler.
+
+    Notes:
+        Converts question failures and deadlines into abstentions. Stops the
+        run when its total budget expires, preserving completed answers. Each
+        question is capped at four steps and 60 seconds or lower configured
+        limits. Logs and model requests may contain business data.
+    """
     if any(not math.isfinite(x) or x <= 0 for x in (args.max_steps, args.max_tokens, args.exec_timeout,
                                                      args.question_timeout, args.model_timeout, args.run_timeout)) or args.limit < 0:
         raise ValueError('Timeouts and step/token limits must be positive; limit cannot be negative')
@@ -191,6 +268,16 @@ def run(args):
                                 'errors': [], 'input_tokens': 0, 'output_tokens': 0, 'retries': 0}
                 pending_repair = [False]
                 def emit(event):
+                    """Save one event and update the current question's measurements.
+
+                    Args:
+                        event: JSON-serializable event dictionary with a stage, and timing,
+                            memory, code or observation fields appropriate to that stage.
+
+                    Returns:
+                        None. Mutates captured measurements/repair state and immediately
+                        flushes the event to the current question's open JSONL log.
+                    """
                     if event.get('stage') == 'timing':
                         operation = event.get('operation')
                         if operation in ('worker_start', 'execution'):
@@ -210,6 +297,19 @@ def run(args):
                     events.flush()
                 original_generate = getattr(model, 'generate', None)
                 def timed_generate(*call_args, **call_kwargs):
+                    """Wrap the original model call with timing, error and retry accounting.
+
+                    Args:
+                        *call_args: Positional arguments forwarded to the original generate.
+                        **call_kwargs: Keyword arguments forwarded to the original generate.
+
+                    Returns:
+                        The original model response unchanged. Updates captured measurements,
+                        including elapsed model time even when generation fails.
+
+                    Raises:
+                        Exception: The underlying generation error is recorded and re-raised.
+                    """
                     model_start = time.monotonic()
                     if pending_repair[0]:
                         measurements['retries'] += 1
@@ -266,6 +366,14 @@ def run(args):
     if timings:
         durations = sorted(item['seconds'] for item in timings)
         def percentile(p):
+            """Select a nearest-rank duration from the captured nonempty sorted timings.
+
+            Args:
+                p: Percentile fraction between zero and one, for example 0.95.
+
+            Returns:
+                Duration in seconds at rank ceil(p * count), with minimum rank one.
+            """
             return durations[max(0, math.ceil(p * len(durations)) - 1)]
         answered = [item for item in timings if item['answer_type'] != 'abstain']
         abstained = [item for item in timings if item['answer_type'] == 'abstain']
@@ -279,6 +387,16 @@ def run(args):
 
 
 def main():
+    """Parse process arguments and dispatch a CLI command.
+
+    Returns:
+        Integer exit code 0 on success, or 2 after printing a handled value,
+        filesystem or runtime error to stderr. Score prints an internal report
+        and optionally saves it; inference commands optionally enable tracing.
+
+    Raises:
+        SystemExit: argparse handles help or invalid command-line syntax.
+    """
     try:
         args = parser().parse_args()
         if args.command == 'score':

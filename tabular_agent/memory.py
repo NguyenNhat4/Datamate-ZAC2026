@@ -2,8 +2,28 @@
 
 
 def memory_callback(emit):
-    """Return a smolagents step callback; do not mutate the agent's memory."""
+    """Create a callback that records completed framework action steps.
+
+    Args:
+        emit: Callback receiving one event dictionary, or None to disable output.
+
+    Returns:
+        A record(step, agent) callback compatible with smolagents step callbacks.
+        It reads the step without modifying framework memory. Events can include
+        complete model messages, observations and business data.
+    """
     def record(step, agent):
+        """Emit the recorded model context and outcome of one action step.
+
+        Args:
+            step: Framework step exposing dict() with model messages, code,
+                observations, errors, token usage and final-answer status.
+            agent: Agent supplied by the framework callback; unused.
+
+        Returns:
+            None. Sends a memory_step event to the captured emit callback when set.
+            Exceptions from step serialization or the callback propagate.
+        """
         if emit is None:
             return
         data = step.dict()

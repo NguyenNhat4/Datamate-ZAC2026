@@ -87,6 +87,18 @@ if st.button('Run selected questions', disabled=not chosen):
 
 @st.fragment(run_every=2)
 def show_run():
+    """Refresh the selected run's progress, results and recorded agent actions.
+
+    Returns:
+        None. Reads the run job from Streamlit session state and displays
+        submissions, timings, scores and complete JSONL log lines using the
+        module's question lookup. Does nothing when no run is selected.
+
+    Notes:
+        Streamlit reruns this fragment every two seconds. The Stop run button
+        terminates the runner subprocess; incomplete trailing log lines are
+        deferred until the next refresh. Other file or JSON errors propagate.
+    """
     job = st.session_state.get('run')
     if not job:
         return
