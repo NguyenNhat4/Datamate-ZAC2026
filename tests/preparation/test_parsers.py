@@ -126,6 +126,19 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(infer_parser("CreatedAt", ["2025-06-01T13:02:01"])["kind"], "datetime")
         self.assertEqual(infer_parser("unknown", ["001", "002"])["kind"], "identifier")
 
+    def test_spaces_around_a_code_are_not_part_of_it(self):
+        parser = infer_parser("Mã sản phẩm", ["SP0017", " SP0017 "])
+        self.assertEqual(parse_value(" SP0017 ", parser), "SP0017")
+        self.assertEqual(parse_value("007", parser), "007")
+
+    def test_a_count_of_days_is_a_number_not_a_date(self):
+        for label in ("Số ngày được nợ", "Hạn nợ (ngày)"):
+            with self.subTest(label=label):
+                parser = infer_parser(label, ["30", "45", "60"])
+                self.assertEqual(parser["kind"], "decimal")
+                self.assertEqual(parse_value("45", parser), Decimal(45))
+        self.assertEqual(infer_parser("Ngày bán", ["01/02/2025"])["kind"], "date")
+
     def test_boolean_inference_requires_boolean_semantics(self):
         parser = infer_parser("IsActive", ["Có", "Không"])
         self.assertEqual(parser["kind"], "boolean")

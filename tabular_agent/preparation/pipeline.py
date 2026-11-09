@@ -192,6 +192,10 @@ def _sequence_epoch(connection, raw, name):
 _PARTITION_TOKEN = re.compile(
     r'(?:(?:\A|[\s_.\-/]+)(?:tháng|thang|quý|quy|năm|nam|month|year|th|t|m|q)?[\s_.\-/]*\d{1,4})+\Z', re.I)
 _DEFAULT_SHEETS = {'', 'sheet', 'trang tinh', 'data', 'du lieu', 'worksheet'}
+# Roles that show a relation records orders or sales: the shop's order table records at least one order fact,
+# and its sales-line table at least one sale fact.
+ORDER_FACTS = frozenset({'status', 'order_date', 'created_at'})
+SALE_LINE_FACTS = frozenset({'status', 'line_amount', 'unit_price', 'order_date', 'created_at'})
 
 
 def _default_sheet(label):
@@ -607,13 +611,19 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
                    and r['validated'] and (not complete or r.get('null_child_keys', 0) == 0)
                    for r in profile.relationships)
 
+    # A sheet keyed by order IDs that records no order fact (for example credit terms, listed only for credit
+    # orders) is not the shop's order table: it cannot be the canonical parent or the order system.
+    def order_table(relation):
+        return (relation['grain'] == 'order' and relation['keys'] == [relation['roles'].get('order_id')]
+                and bool(ORDER_FACTS & relation['roles'].keys()))
+
     # Verified canonical parents are the only source of advertised foreign keys.
     for child in relations:
         for role, expected in {'order_id': 'order', 'product_id': 'product',
                                'customer_id': 'customer', 'receipt_id': 'receipt', 'lot_id': 'lot'}.items():
             key = child['roles'].get(role)
             parents = [r for r in relations if r is not child and r['grain'] == expected
-                       and r['keys'] == [r['roles'].get(role)]]
+                       and r['keys'] == [r['roles'].get(role)] and (expected != 'order' or order_table(r))]
             if key is None or len(parents) != 1:
                 continue
             parent = parents[0]
@@ -630,8 +640,11 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
             if orphans:
                 issue('ORPHAN_KEYS', 'Unmatched nonnull keys prevent a complete relationship.', child['name'], orphans)
 
-    orders = [r for r in relations if r['grain'] == 'order' and r['keys'] == [r['roles'].get('order_id')]]
+    orders = [r for r in relations if order_table(r)]
     items = [r for r in relations if r['grain'] == 'order_item' and 'order_id' in r['roles']]
+    # When some line table records sale facts, a line table that records none (for example a delivery book:
+    # order, product, quantity) is not a candidate for the shop's sales lines.
+    items = [r for r in items if SALE_LINE_FACTS & r['roles'].keys()] or items
     for order in orders:
         if 'order_goods_amount' not in order['roles']:
             continue
@@ -737,6 +750,14 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
     roles = base['roles']
     oid, status = roles.get('order_id'), roles.get('status')
     if not oid or not status:
+        proposed = sorted({table.roles['status'] for table in profile.tables
+                           if table.region_id in base.get('source_regions', []) and table.roles.get('status')})
+        if proposed:
+            issue('ORDER_STATUS_BLOCKED', f'The order status column ({", ".join(proposed)}) failed cleaning, so '
+                  'whole-order eligibility cannot be established.', base['name'])
+        else:
+            issue('ORDER_STATUS_MISSING', 'The order system records no order status, so whole-order eligibility '
+                  'cannot be established.', base['name'])
         return semantic
     bq = _relation_sql(base)
     missing_ids = connection.execute(f'SELECT count(*) FROM {bq} WHERE {_q(oid)} IS NULL '
@@ -828,21 +849,28 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
         order_day = lambda prefix='': (f'{prefix}{_q(date_column)}' if roles.get('order_date')
                                        else f'CAST({prefix}{_q(date_column)} AS DATE)')
         when = order_day()
-        missing_test = 'count(' + when + ')=0' if inheritance else 'count(' + when + ')<>count(*)'
+        # When the README records a return as a negative-quantity line of the same order, that line carries the
+        # day of the return; the order's day is read from its sale lines only.
+        sales_only = lambda prefix='': (f' FILTER (WHERE {prefix}{_q(roles["quantity"])} IS NULL '
+                                        f'OR {prefix}{_q(roles["quantity"])}>=0)'
+                                        if return_policy['negative_quantity_is_return'] and 'quantity' in roles else '')
+        counted = 'count(' + when + ')' + sales_only()
+        missing_test = counted + '=0' if inheritance else counted + '<>count(*)' + sales_only()
         conflicts = connection.execute(f'SELECT count(*) FROM (SELECT {_q(oid)} FROM {bq} GROUP BY 1 '
-            f'HAVING count(DISTINCT {when})<>1 OR {missing_test})').fetchone()[0]
+            f'HAVING count(DISTINCT {when}){sales_only()}<>1 OR {missing_test})').fetchone()[0]
         if conflicts:
             issue('ORDER_GRAIN_UNRESOLVED', 'Order dates are missing or do not functionally depend on order IDs.', base['name'], conflicts)
             return semantic
-        # Order-level facts recorded on lines are published only when they are constant within each order.
+        # Order-level facts recorded on lines are published only when they are constant within each order (on its
+        # sale lines, when return lines record the return instead).
         carried = []
         for role in ('customer_id', 'customer_name', 'payment_method', 'channel', 'employee', 'created_at'):
             column = roles.get(role)
             if column and connection.execute(f'SELECT count(*) FROM (SELECT {_q(oid)} FROM {bq} GROUP BY 1 '
-                                             f'HAVING count(DISTINCT {_q(column)})>1)').fetchone()[0] == 0:
-                carried.append(f'MIN(b.{_q(column)}) AS {_q(role)}')
+                                             f'HAVING count(DISTINCT {_q(column)}){sales_only()}>1)').fetchone()[0] == 0:
+                carried.append(f'MIN(b.{_q(column)}){sales_only("b.")} AS {_q(role)}')
         amount = f', SUM(b.{_q(roles["line_amount"])}) AS revenue' if 'line_amount' in roles else ''
-        sql = (f'SELECT b.{_q(oid)} order_id, MIN({order_day("b.")}) order_date' + ''.join(', ' + c for c in carried) + amount +
+        sql = (f'SELECT b.{_q(oid)} order_id, MIN({order_day("b.")}){sales_only("b.")} order_date' + ''.join(', ' + c for c in carried) + amount +
                ', bool_or(f.cancelled) cancelled, bool_or(f.returned) returned, '
                "CASE WHEN bool_or(f.cancelled) THEN 'cancelled' WHEN bool_or(f.returned) THEN 'returned' "
                "WHEN bool_or(f.shipping) THEN 'shipping' ELSE 'completed' END AS order_state, "

@@ -198,6 +198,10 @@ class RulePolicies(unittest.TestCase):
         policy = return_evidence_policy("- **Số lượng trả**: số lượng khách trả lại (đơn vị cơ bản); lớn hơn 0: đơn đó có trả hàng")
         self.assertTrue(policy["positive_return_quantity_is_return"])
 
+    def test_order_time_described_as_the_hour_of_the_order(self):
+        from tabular_agent.preparation.semantics import _role_from_description
+        self.assertEqual(_role_from_description("giờ đặt đơn (dòng trả hàng: lúc trả)", ""), "created_at")
+
     def test_status_vocabulary_is_conservative(self):
         for value in (None, "", " ", "ready", "Đã thanh toán", "hoàn thành một phần", "không huỷ", 1):
             self.assertEqual(classify_status(value), "unknown", value)

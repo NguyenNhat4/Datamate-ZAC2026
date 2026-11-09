@@ -215,7 +215,7 @@ def _role_from_description(description: str, context: str) -> str | None:
         ("customer_name", ("ten khach", "customer name")),
         ("product_name", ("ten hang", "ten san pham", "product name")),
         ("order_date", ("ngay ban", "ngay dat", "order date")),
-        ("created_at", ("thoi diem dat don", "order creation time")),
+        ("created_at", ("thoi diem dat don", "gio dat don", "order creation time")),
         ("status", ("trang thai don", "trang thai phieu nhap", "order status")),
         ("order_goods_amount", ("tong tien hang cua don", "tien hang cua don")),
         ("order_total", ("tong tien don", "so khach phai tra cho ca don", "order total")),
@@ -351,7 +351,7 @@ _STATUS_LABELS = {
                  "dang ship", "cho giao", "cho giao hang", "cho xu ly", "cho lay hang", "shipping", "in delivery",
                  "processing", "in progress"},
     "cancelled": {"huy", "da huy", "bi huy", "huy don", "don huy", "da huy don", "khach huy", "huy bo", "da huy bo",
-                  "cancelled", "canceled", "cancel"},
+                  "khong giao duoc", "cancelled", "canceled", "cancel"},
     "returned": {"tra hang", "da tra hang", "hoan tra", "da hoan tra", "doi tra", "tra lai", "da tra lai",
                  "hoan hang", "da hoan hang", "hang tra ve", "khach tra hang", "returned", "return", "refunded"},
 }

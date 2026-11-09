@@ -261,7 +261,8 @@ def parse_value(value: Any, parser: dict[str, Any]) -> Any:
     if kind == "identifier":
         if isinstance(value, bool) or isinstance(value, (float, Decimal)) and not Decimal(str(value)).is_finite():
             raise ValueError("Invalid identifier value")
-        return value if isinstance(value, str) else str(value)
+        # Spaces around a code are typing noise: ' SP0017 ' and 'SP0017' are the same product.
+        return value.strip() if isinstance(value, str) else str(value)
     if kind == "decimal":
         return _parse_decimal(value, parser)
     if kind == "quantity":
@@ -375,7 +376,9 @@ def infer_parser(label: str, samples: list[Any], *, epoch: str | None = None, ye
         "evidence": {"representations": dict(Counter(representation(value) for value in samples)), "sample_count": len(samples)},
     }
     identifier = bool(words & {"id", "code", "sku", "barcode", "sdt", "phone", "tel", "ma", "mst"}) or label_key in {"stt", "so dien thoai", "dien thoai", "so don", "so don hang", "so hoa don", "invoice number", "order number"}
-    temporal = bool(words & {"date", "datetime", "timestamp", "ngay", "created", "updated", "expiry"}) or any(token in label_key for token in ("thoi gian", "han su dung", "han dung", "han sd"))
+    # A number of days or a day of the month ("Số ngày được nợ", "Hạn nợ (ngày)") is a number, not a date.
+    day_count = "so ngay" in label_key or re.search(r"\(\s*ngay\s*\)", text_key(label)) is not None
+    temporal = not day_count and (bool(words & {"date", "datetime", "timestamp", "ngay", "created", "updated", "expiry"}) or any(token in label_key for token in ("thoi gian", "han su dung", "han dung", "han sd")))
     quantity = bool(words & {"quantity", "qty", "sl", "stock"}) or any(token in label_key for token in ("so luong", "ton kho", "ton dau", "ton cuoi", "so vien", "so goi"))
     numeric = bool(words & {"amount", "price", "total", "cost", "revenue", "money", "debit", "credit", "discount", "balance", "vat", "gia", "tien", "phi", "no", "von", "percent", "rate", "doanhthu"}) or any(token in label_key for token in ("doanh thu", "chiet khau", "thanh tien", "loi nhuan", "ty le"))
     descriptive = bool(words & {"ten", "name", "description", "note", "notes", "email", "status", "state", "method", "reason", "cach", "kieu", "loai"}) or any(token in label_key for token in ("ghi chu", "trang thai", "hinh thuc", "phuong thuc", "dia chi", "hoat chat")) or label_key in {"unit", "units", "don vi", "don vi tinh", "dvt"}

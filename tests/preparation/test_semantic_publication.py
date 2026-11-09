@@ -1,5 +1,6 @@
 """Semantic SQL publication checks against invented data and explicit rules."""
 
+from datetime import date, datetime
 from decimal import Decimal
 import unittest
 
@@ -124,6 +125,91 @@ class SemanticPublication(unittest.TestCase):
         schema = self.schema()
         self.assertNotIn("semantic.orders", self.names(schema))
         self.assertTrue(any(i.code == "ORDER_GRAIN_UNRESOLVED" for i in self.profile.issues))
+
+    def sales_book(self, rows):
+        """A line-based sales book: one row per line, the order's date and status repeated on each line."""
+        return self.table("sales_book", "order_item", {"order_id": "VARCHAR", "order_date": "DATE", "status": "VARCHAR",
+            "product_name": "VARCHAR", "quantity": "DECIMAL(20,2)", "line_amount": "DECIMAL(20,2)"}, rows)
+
+    def test_a_sheet_of_order_ids_without_order_facts_is_not_the_order_table(self):
+        # Credit terms list only credit orders: an order key, a day count and a due date, no order fact.
+        self.table("credit_terms", "order", {"order_id": "VARCHAR", "days": "DECIMAL(5,0)"}, [("2", 30)], ["order_id"])
+        self.sales_book([("1", "2025-01-01", "completed", "A", 1, 10), ("2", "2025-01-02", "completed", "B", 2, 20)])
+        schema = self.schema()
+        self.assertIn("semantic.eligible_sales_lines", self.names(schema))
+        self.assertEqual(self.db.execute("SELECT count(*) FROM semantic.eligible_orders").fetchone()[0], 2)
+        self.assertFalse(any(i.code in ("ORPHAN_KEYS", "ORDER_SYSTEM_AMBIGUOUS") for i in self.profile.issues))
+
+    def test_an_order_system_without_status_names_its_issue(self):
+        self.table("orders", "order", {"order_id": "VARCHAR", "order_date": "DATE"}, [("1", "2025-01-01")], ["order_id"])
+        schema = self.schema()
+        self.assertNotIn("semantic.orders", self.names(schema))
+        self.assertTrue(any(i.code == "ORDER_STATUS_MISSING" for i in self.profile.issues))
+
+    def test_a_status_column_that_failed_cleaning_is_named(self):
+        orders = self.table("orders", "order", {"order_id": "VARCHAR", "order_date": "DATE"}, [("1", "2025-01-01")],
+                            ["order_id"])
+        orders["source_regions"] = ["source:1"]
+        self.profile.tables.append(TableProfile(source_id="source", region_id="source:1", source={}, name="orders",
+            labels=["progress"], header_rows=[1], grain="order", roles={"status": "progress"},
+            columns=[ColumnProfile(name="progress", label="progress", position=0, role="status", usable=False,
+                                   parser={"kind": "decimal"})]))
+        self.schema()
+        issue = next(i for i in self.profile.issues if i.code.startswith("ORDER_STATUS"))
+        self.assertEqual(issue.code, "ORDER_STATUS_BLOCKED")
+        self.assertIn("progress", issue.message)
+
+    def test_a_delivery_book_is_not_a_sales_line_table(self):
+        self.sales_book([("1", "2025-01-01", "completed", "A", 1, 10), ("2", "2025-01-02", "completed", "B", 2, 20)])
+        self.table("deliveries", "order_item", {"order_id": "VARCHAR", "product_name": "VARCHAR",
+                                                "base_quantity": "DECIMAL(20,2)"}, [("1", "A", 1), ("2", "B", 2)])
+        schema = self.schema()
+        self.assertIn("semantic.eligible_sales_lines", self.names(schema))
+        self.assertEqual(self.db.execute("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines").fetchone()[0],
+                         Decimal(30))
+
+    def test_a_line_table_without_sale_facts_is_used_when_it_is_the_only_one(self):
+        self.orders()
+        self.table("lines", "order_item", {"order_id": "VARCHAR", "product_name": "VARCHAR",
+                                           "base_quantity": "DECIMAL(20,2)"}, [("1", "A", 1), ("2", "B", 2)])
+        schema = self.schema()
+        self.assertIn("semantic.eligible_sales_lines", self.names(schema))
+        self.assertEqual(self.db.execute("SELECT SUM(base_quantity) FROM semantic.eligible_sales_lines").fetchone()[0],
+                         Decimal(3))
+
+    def test_an_order_that_could_not_be_delivered_is_cancelled(self):
+        self.sales_book([("1", "2025-01-01", "Đã giao", "A", 1, 10), ("2", "2025-01-02", "Không giao được", "B", 2, 20)])
+        self.schema()
+        self.assertEqual(self.db.execute("SELECT order_id, order_state FROM semantic.orders ORDER BY 1").fetchall(),
+                         [("1", "completed"), ("2", "cancelled")])
+
+    def test_a_return_line_dated_later_keeps_the_order_on_its_sale_day(self):
+        readme = "- Trả hàng: hàng trả ghi số lượng âm, cùng mã đơn với đơn đã bán: đơn có dòng số lượng âm là đơn có trả hàng."
+        rows = [("1", "2025-01-01", "completed", "A", 1, 10), ("1", "2025-01-05", "completed", "A", -1, -10),
+                ("2", "2025-01-02", "completed", "B", 2, 20)]
+        self.sales_book(rows)
+        schema = self.schema(readme)
+        self.assertIn("semantic.eligible_sales_lines", self.names(schema))
+        self.assertEqual(self.db.execute("SELECT order_id, order_date, order_state FROM semantic.orders ORDER BY 1").fetchall(),
+                         [("1", date(2025, 1, 1), "returned"), ("2", date(2025, 1, 2), "completed")])
+        # Without the README rule a second date on an order is still a conflict.
+        self.setUp()
+        self.sales_book(rows)
+        schema = self.schema()
+        self.assertNotIn("semantic.orders", self.names(schema))
+        self.assertTrue(any(i.code == "ORDER_GRAIN_UNRESOLVED" for i in self.profile.issues))
+
+    def test_a_return_line_timed_later_keeps_the_order_time_and_shift(self):
+        readme = "- Trả hàng: hàng trả ghi số lượng âm, cùng mã đơn với đơn đã bán: đơn có dòng số lượng âm là đơn có trả hàng."
+        rules = RULES + "\n| Ca sáng, ca chiều | theo giờ tạo đơn: ca sáng 06:00–13:59, ca chiều 14:00–21:59 |\n"
+        self.table("sales_book", "order_item", {"order_id": "VARCHAR", "order_date": "DATE", "created_at": "TIMESTAMP",
+            "status": "VARCHAR", "product_name": "VARCHAR", "quantity": "DECIMAL(20,2)", "line_amount": "DECIMAL(20,2)"},
+            [("1", "2025-01-01", "2025-01-01 09:00:00", "completed", "A", 1, 10),
+             ("1", "2025-01-05", "2025-01-05 15:30:00", "completed", "A", -1, -10),
+             ("2", "2025-01-02", "2025-01-02 14:00:00", "completed", "B", 2, 20)])
+        self.schema(readme, rules)
+        self.assertEqual(self.db.execute("SELECT order_id, created_at, shift FROM semantic.orders ORDER BY 1").fetchall(),
+                         [("1", datetime(2025, 1, 1, 9, 0), "morning"), ("2", datetime(2025, 1, 2, 14, 0), "afternoon")])
 
     def test_unrelated_receipt_quantities_do_not_establish_sales_quantities(self):
         self.table("receipts", "receipt_item", {"base_quantity": "DECIMAL(20,2)", "product_name": "VARCHAR"}, [(10, "A")])
