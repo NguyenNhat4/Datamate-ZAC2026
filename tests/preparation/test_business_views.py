@@ -445,7 +445,9 @@ class UnreadySales(unittest.TestCase):
         text, allowed = describe_schema(self.db, schema)
         self.assertIn("semantic.eligible_orders", allowed)
         self.assertIn("Number of orders", text)
-        self.assertIn("SELECT SUM(order_goods_amount) FROM semantic.eligible_orders", text)
+        patterns = text[text.index("## Query patterns"):]
+        self.assertTrue(patterns.split("\n")[1].startswith("- Revenue (doanh thu) in a period"))
+        self.assertIn("SELECT SUM(order_goods_amount) FROM semantic.eligible_orders", patterns)
         self.assertNotIn("not separated", text)
         with self.assertRaises(QueryRejected) as caught:
             check_query(self.db, "SELECT SUM(c1) FROM clean.sales_book", allowed, unready_sales_relations(schema), True)

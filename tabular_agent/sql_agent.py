@@ -447,6 +447,7 @@ def describe_schema(connection, schema, question=None):
     lines += ['## Cleaned source tables', '']
     for relation in clean:
         lines += render(relation)
+    extra_patterns = []
     if unready:
         abstain = f'{{"type": "abstain", "reason": "{UNREADY_REASON}"}}'
         price = ('The current price or cost in a catalogue is not the selling price on a past date.')
@@ -456,11 +457,13 @@ def describe_schema(connection, schema, question=None):
             columns = {column['name'] for column in orders.get('columns', [])}
             lines.append('These sales tables are not rulebook-ready and cannot be queried: ' + ', '.join(sorted(unready))
                          + '. semantic.orders and semantic.eligible_orders above apply the rulebook: use them for '
-                         'order counts, cancelled orders and order revenue.')
+                         'order counts, cancelled orders and order revenue (see the query patterns).')
             if 'order_goods_amount' in columns and 'revenue' not in columns and 'order_date' in columns:
-                lines.append('Revenue (doanh thu) in a period is the goods amount of eligible orders:\n  '
-                             'SELECT SUM(order_goods_amount) FROM semantic.eligible_orders '
-                             "WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'")
+                # Revenue is the goods amount of eligible orders (before order discount and delivery fee), not the
+                # amount the customer pays; shown with the other patterns, where the model looks for queries.
+                extra_patterns.append('- Revenue (doanh thu) in a period: the goods amount of eligible orders, not '
+                                      'order_total:\n  SELECT SUM(order_goods_amount) FROM semantic.eligible_orders '
+                                      "WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'")
             lines += ['A question that needs individual sales lines (quantities sold, best-selling products, revenue '
                       f'of a product or group, the selling price on a date) cannot be answered here: answer {abstain}. '
                       + price, '']
@@ -471,7 +474,7 @@ def describe_schema(connection, schema, question=None):
                       'products, top customers, the selling price on a date) cannot be answered for this business: '
                       f'answer {abstain}. ' + price + ' Other tables listed above can be used for what they record.', '']
     published = {relation['name']: {column['name'] for column in relation.get('columns', [])} for relation in relations}
-    patterns = [f'- {title}:\n  {sql}' for name, needed, title, sql, *kind in PATTERNS
+    patterns = extra_patterns + [f'- {title}:\n  {sql}' for name, needed, title, sql, *kind in PATTERNS
                 if name in published and set(needed) <= published[name]
                 and (question is None or not kind or _PATTERN_KINDS[kind[0]](question))]
     if patterns:
