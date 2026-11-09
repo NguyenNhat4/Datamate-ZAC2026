@@ -8,6 +8,7 @@ checked against the bundle's relation allowlist before it runs.
 import json
 import re
 import threading
+import unicodedata
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -44,14 +45,15 @@ Rules:
 - Questions are often typed without accents or with chat abbreviations: hnay = hôm nay, hqua = hôm qua,
   dthu = doanh thu, bn = bao nhiêu, sp = sản phẩm, dc/đc = được, ko/k = không, kh = khách hàng, sl = số lượng.
 - If the asked period lies entirely outside "Data coverage", answer
-  {"type": "unanswerable", "reason": "..."} without guessing. Also use unanswerable when the business does not
-  record the information at all.
+  {"type": "unanswerable", "reason": "...", "period": ["YYYY-MM-DD", "YYYY-MM-DD"]} with the asked period.
+  Unanswerable is accepted only when that period is outside the coverage.
 - If a query inside the data coverage returns no rows or NULL, check the filter values and retry; do not
   conclude 0 or unanswerable from a wrong filter.
 - If a needed column is withheld, or you are unsure, answer {"type": "abstain", "reason": "..."}.
 - Answer types: number, percent, string, date (YYYY-MM-DD or YYYY-MM), boolean, list, table
-  ({"columns": [...], "rows": [[...]]}), unanswerable, abstain. Money is a whole number of VND.
-  A question asking for several numbers is a list in the order asked.
+  ({"type": "table", "answer": {"columns": [...], "rows": [[...]]}}), unanswerable, abstain.
+  Money is a whole number of VND. Several numbers asked together are a list in the order asked,
+  for example {"type": "list", "answer": [13, 2]}. A table has one named object per row.
 - Give the final answer only from a query result you have seen, copying the value exactly.
 """
 
@@ -73,6 +75,11 @@ PATTERNS = (
     ('semantic.stock_snapshot', 'Stock of a product in large units (còn mấy hộp chẵn, mấy cái lẻ), answer as list [whole, loose]',
      "SELECT whole_large_units, loose_base_units FROM semantic.stock_snapshot WHERE name_like(product_name, 'tên hàng')"),
 )
+
+
+_SYSTEM_DATE = re.compile(r'\b(?:current_date|current_timestamp|current_time|localtimestamp|localtime|'
+                          r'get_current_timestamp|get_current_time|transaction_timestamp|now\s*\(|today\s*\()', re.I)
+_DATE_LITERAL = re.compile(r"'(\d{4}-\d{2}-\d{2})(?:[ T][\d:.]+)?'")
 
 
 class QueryRejected(ValueError):
@@ -140,6 +147,8 @@ def check_query(connection, sql, allowed):
     sql = sql.strip().rstrip(';').strip()
     if not sql:
         raise QueryRejected('Empty query')
+    if _SYSTEM_DATE.search(re.sub(r"'(?:[^']|'')*'", "''", sql)):
+        raise QueryRejected('The system date is not allowed; use the explicit dates from the Dates block')
     parsed = json.loads(connection.execute('SELECT json_serialize_sql(?)', [sql]).fetchone()[0])
     if parsed.get('error'):
         raise QueryRejected(parsed.get('error_message') or 'Only SELECT statements are allowed')
@@ -271,21 +280,103 @@ def describe_schema(connection, schema):
     patterns = [f'- {title}:\n  {sql}' for name, title, sql in PATTERNS if name in allowed]
     if patterns:
         lines += ['## Query patterns (replace dates, units and names)', *patterns, '']
-    for name, column in (('semantic.orders', 'order_date'), ('semantic.eligible_sales_lines', 'order_date')):
-        relation = next((r for r in semantic if r['name'] == name), None)
-        if relation and any(c['name'] == column for c in relation['columns']):
-            first, last = connection.execute(f'SELECT MIN({column}), MAX({column}) FROM {name}').fetchone()
-            if first and last:
-                lines.append(f'## Data coverage\nSales records run from {first} to {last}. '
-                             'A period entirely before or after this range has no data: unanswerable, not 0.')
-            break
+    coverage = sales_coverage(connection, schema)
+    if coverage:
+        lines.append(f'## Data coverage\nSales records run from {coverage[0]} to {coverage[1]}. '
+                     'A period entirely before or after this range has no data: unanswerable, not 0.')
     else:
-        coverage = sorted({f"{value.get('role')}: {value.get('observed_min')} to {value.get('observed_max')}"
+        observed = sorted({f"{value.get('role')}: {value.get('observed_min')} to {value.get('observed_max')}"
                            for value in schema.get('temporal_coverage', {}).values()
                            if isinstance(value, dict) and value.get('observed_min')})
-        if coverage:
-            lines.append('## Data coverage\nObserved date ranges: ' + '; '.join(coverage))
+        if observed:
+            lines.append('## Data coverage\nObserved date ranges: ' + '; '.join(observed))
     return '\n'.join(lines), allowed
+
+
+def sales_coverage(connection, schema):
+    """Return the first and last sales date published in the bundle, or None when no sales relation has one."""
+    names = {relation['name']: relation for relation in schema.get('relations', [])}
+    for name in ('semantic.orders', 'semantic.eligible_sales_lines'):
+        relation = names.get(name)
+        if relation and any(column['name'] == 'order_date' for column in relation['columns']):
+            first, last = connection.execute(f'SELECT MIN(order_date), MAX(order_date) FROM {name}').fetchone()
+            if first and last:
+                return first, last
+    return None
+
+
+def asked_period(answer, last_sql):
+    """Read the period an unanswerable answer refers to: its own "period", else the date literals of the last query."""
+    period = answer.get('period') if isinstance(answer, dict) else None
+    values = period if isinstance(period, list) and len(period) == 2 else _DATE_LITERAL.findall(last_sql or '')
+    try:
+        dates = sorted(date.fromisoformat(str(value)[:10]) for value in values)
+    except ValueError:
+        return None
+    return (dates[0], dates[-1]) if dates else None
+
+
+def outside_coverage(period, coverage):
+    """True when a period lies entirely before or entirely after the data's sales dates."""
+    if not period or not coverage:
+        return False
+    return period[1] < coverage[0] or period[0] > coverage[1]
+
+
+def _fold(text):
+    text = unicodedata.normalize('NFD', str(text).replace('đ', 'd').replace('Đ', 'D'))
+    return ' '.join(re.sub(r'[^a-z0-9]+', ' ', ''.join(c for c in text if not unicodedata.combining(c)).lower()).split())
+
+
+_PHRASES = (
+    ('today', ('hom nay', 'hnay', 'bua nay', 'hom ni')),
+    ('yesterday', ('hom qua', 'hqua', 'bua qua', 'hom wa', 'bua wa')),
+    ('this week', ('tuan nay',)),
+    ('last week', ('tuan truoc', 'tuan roi', 'tuan vua roi', 'tuan vua qua', 'tuan qua')),
+    ('this month', ('thang nay',)),
+    ('last month', ('thang truoc', 'thang roi', 'thang vua roi', 'thang vua qua')),
+    ('this quarter', ('quy nay',)),
+    ('this year', ('tu dau nam', 'nam nay')),
+)
+
+
+def date_phrases(question, as_of_date):
+    """Resolve the relative date phrases that occur in a question, by the rulebook's time rules.
+
+    Returns one line per phrase found, each giving the phrase's meaning as an
+    explicit date or inclusive range for this reference date. Phrases are
+    matched on accent-folded words, so unaccented typing is recognised.
+    """
+    today = date.fromisoformat(as_of_date)
+    monday = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+    previous_end = month_start - timedelta(days=1)
+    previous_start = previous_end.replace(day=1)
+    same_day = previous_start.replace(day=min(today.day, previous_end.day))
+    quarter_start = date(today.year, 3 * ((today.month - 1) // 3) + 1, 1)
+    span = lambda first, last: f'{first.isoformat()} to {last.isoformat()}'
+    meaning = {
+        'today': f'the single day {today.isoformat()}',
+        'yesterday': f'the single day {(today - timedelta(days=1)).isoformat()}',
+        'this week': span(monday, today),
+        'last week': span(monday - timedelta(days=7), monday - timedelta(days=1)),
+        'this month': span(month_start, today),
+        'last month': f'{span(previous_start, previous_end)} (whole month); when compared with this month use '
+                      f'{span(previous_start, same_day)}',
+        'this quarter': span(quarter_start, today),
+        'this year': span(date(today.year, 1, 1), today),
+    }
+    folded = f' {_fold(question)} '
+    lines = []
+    for name, phrases in _PHRASES:
+        found = next((phrase for phrase in phrases if f' {phrase} ' in folded), None)
+        if found:
+            lines.append(f'- "{found}" means {name}: {meaning[name]}')
+    for count, _ in re.findall(r' (\d{1,3}) ngay (gan nhat|gan day|vua qua|qua) ', folded):
+        days = int(count)
+        if days:
+            lines.append(f'- "{count} ngay gan nhat" means the last {days} days: {span(today - timedelta(days=days - 1), today)}')
+    return lines
 
 
 def date_block(as_of_date):
@@ -332,9 +423,17 @@ def normalize_answer(answer):
 
     Numbers written as text become JSON numbers (text with a leading zero is a
     code and stays text), integral floats become integers, and percentages are
-    rounded half-up to two decimals. Other values are returned unchanged.
+    rounded half-up to two decimals. A table body written beside "type" is
+    moved under "answer"; a one-row table of numbers only becomes a list, since
+    a table row needs a named object. Other values are returned unchanged.
     """
-    if not isinstance(answer, dict) or 'answer' not in answer:
+    if not isinstance(answer, dict):
+        return answer
+    if answer.get('type') == 'table' and 'answer' not in answer and 'columns' in answer and 'rows' in answer:
+        # The table body was written beside "type" instead of under "answer".
+        answer = {**{k: v for k, v in answer.items() if k not in ('columns', 'rows')},
+                  'answer': {'columns': answer['columns'], 'rows': answer['rows']}}
+    if 'answer' not in answer:
         return answer
     kind, value = answer.get('type'), answer['answer']
     if kind in ('number', 'percent'):
@@ -344,8 +443,12 @@ def normalize_answer(answer):
     elif kind == 'list' and isinstance(value, list):
         value = [_number(item) for item in value]
     elif kind == 'table' and isinstance(value, dict) and isinstance(value.get('rows'), list):
-        value = {**value, 'rows': [[_number(cell) for cell in row] if isinstance(row, list) else row
-                                   for row in value['rows']]}
+        rows = [[_number(cell) for cell in row] if isinstance(row, list) else row for row in value['rows']]
+        value = {**value, 'rows': rows}
+        numeric = lambda cell: type(cell) in (int, float)
+        if len(rows) == 1 and isinstance(rows[0], list) and len(rows[0]) > 1 and all(numeric(cell) for cell in rows[0]):
+            # The rulebook's table has one named object per row; several numbers asked together are a list.
+            return {**answer, 'type': 'list', 'answer': rows[0]}
     return {**answer, 'answer': value}
 
 
@@ -395,6 +498,7 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                            "LIKE '%' || strip_accents(lower(trim(txt))) || '%'")
         connection.execute('SET lock_configuration=true')
         schema_text, allowed = describe_schema(connection, schema)
+        coverage = sales_coverage(connection, schema)
         context = '\n\n'.join([
             '# Rulebook\n' + rulebook,
             '# Business README\n' + (readme.read_text(encoding='utf-8') if readme.exists() else ''),
@@ -402,10 +506,15 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
             '# Dates\n' + date_block(question['as_of_date']),
             '# Question\n' + question['question'],
         ])
+        phrases = date_phrases(question['question'], question['as_of_date'])
+        if phrases:
+            context += '\n\nDate phrases in this question (use exactly these dates):\n' + '\n'.join(phrases)
         emit({'stage': 'schema', 'text': schema_text})
         text = lambda role, value: ChatMessage(role=role, content=[{'type': 'text', 'text': value}])
         messages = [text(MessageRole.SYSTEM, INSTRUCTIONS), text(MessageRole.USER, context)]
         succeeded = False
+        last_sql = ''
+        unverified = 0
         with question_span(question):
             for step in range(1, max_steps + 1):
                 response = model.generate(messages)
@@ -418,15 +527,35 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                 kind, body = _block(content)
                 if kind == 'json':
                     try:
-                        answer = validate_answer(normalize_answer(json.loads(body)))
+                        raw_answer = json.loads(body)
+                        answer = validate_answer(normalize_answer(raw_answer))
                     except (ValueError, TypeError) as error:
-                        feedback = f'Invalid final answer: {error}. Send a ```json block with a valid typed answer.'
+                        feedback = (f'Invalid final answer: {error}. Valid forms: {{"type": "number", "answer": 10}}; '
+                                    'several numbers in the order asked: {"type": "list", "answer": [13, 2]}; '
+                                    'one named object per row: {"type": "table", "answer": {"columns": ["name", "value"], '
+                                    '"rows": [["A", 1]]}}. Send one corrected ```json block.')
                     else:
-                        if succeeded or answer['type'] in ('abstain', 'unanswerable'):
+                        if answer['type'] == 'unanswerable':
+                            # "No data" is accepted only when code can confirm it; an empty result from a
+                            # wrong filter must not become a wrong answer.
+                            if outside_coverage(asked_period(raw_answer, last_sql), coverage):
+                                return answer
+                            unverified += 1
+                            if unverified > 1:
+                                return {'type': 'abstain', 'reason': 'Unanswerable could not be verified against the data coverage.'}
+                            span = f'{coverage[0]} to {coverage[1]}' if coverage else 'unknown'
+                            feedback = ('Not accepted. Unanswerable is confirmed only for a period entirely outside the data '
+                                        f'coverage ({span}); state it as "period": ["YYYY-MM-DD", "YYYY-MM-DD"] in the answer. '
+                                        'If the period is inside the coverage, the data exists and your filters are wrong: '
+                                        "match names with name_like(column, 'text'), take dates from the Dates block, and use "
+                                        'only listed columns and labels. Fix the query, or answer {"type": "abstain"}.')
+                        elif succeeded or answer['type'] == 'abstain':
                             return answer
-                        feedback = 'Run a query first; answer only from a query result.'
+                        else:
+                            feedback = 'Run a query first; answer only from a query result.'
                 elif kind in ('sql', '') and body:
                     emit({'stage': 'sql', 'sql': body})
+                    last_sql = body
                     try:
                         feedback = 'Result:\n' + run_query(connection, body, allowed)
                         succeeded = True

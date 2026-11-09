@@ -16,10 +16,14 @@ Development measurements, local 7B model (Qwen2.5-Coder-7B-Instruct, Q4_K_M) on 
 |---|---|---|---|---|---|---|
 | Raw files (before) | 10, seed 42 | 0 | 1 | 9 | −0.10 | 29.3 |
 | SQL over first bundles | same 10 | 1 | 8 | 1 | −0.70 | 5.6 |
-| SQL after the decisions below | same 10 | 10 | 0 | 0 | 1.00 | 5.3 |
-| SQL after the decisions below | 39 other questions, same 8 businesses | 18 | 19 | 2 | −0.03 | 6.4 |
+| SQL after sections 2.1–2.6 and 3.1–3.9 | same 10 | 10 | 0 | 0 | 1.00 | 5.3 |
+| SQL after sections 2.1–2.6 and 3.1–3.9 | 39 other questions, same 8 businesses | 18 | 19 | 2 | −0.03 | 6.4 |
+| SQL after all decisions (final) | same 10 | 10 | 0 | 0 | 1.00 | 5.5 |
+| SQL after all decisions (final) | same 39 other questions | 19 | 12 | 8 | 0.18 | 6.6 |
 
-The 10 questions were used to find problems, so their score is not an accuracy estimate. The 39 other questions were not looked at while making these decisions; they are the honest estimate for these eight businesses. These numbers say nothing about businesses that were not prepared, the public or private split, or the reference hardware.
+The 10 questions were used to find problems, so their score is not an accuracy estimate. The 39 other questions are the better estimate for these eight businesses: their failures were read once, after the first measurement, to choose what to do next (sections 2.7–2.10 and 3.10), but no change was tuned to an individual question among them. These numbers say nothing about businesses that were not prepared, the public or private split, or the reference hardware.
+
+Between the first and the final measurement on the 39 questions, no previously correct answer was lost: 18 stayed correct, 1 wrong answer became correct, and 6 wrong answers became abstentions.
 
 ## 2. Decisions in the answering path
 
@@ -75,6 +79,34 @@ The 10 questions were used to find problems, so their score is not an accuracy e
 **Decision.** Numeric text in a number, percent, list or table answer becomes a JSON number. Integral floats become integers. Percentages are rounded half-up to two decimals. Text with a leading zero is treated as a code and left alone.
 
 **Why.** A correct stock answer was returned as `["13", "2"]` and scored wrong, because the type and format must match exactly. Format rules that do not depend on the question belong in code.
+
+### 2.7 Accept `unanswerable` only when code can confirm it
+
+**Decision.** An `unanswerable` answer is accepted only when the asked period lies entirely outside the data's sales dates. The period comes from the answer's own `"period"` field, or else from the date literals of the last query. Otherwise the model gets one specific correction and one more attempt; a second unconfirmed `unanswerable` is returned as an abstention.
+
+**Why.** On the 39 other questions the model answered `unanswerable` 11 times and 10 of those were wrong. In each wrong case a query had matched nothing because of its own filters (a name compared with `=`, the system date, a column that does not exist), and the model then concluded the data did not exist. A wrong answer scores −1 and an abstention 0, so an unconfirmed "no data" claim is a bad bet. The rulebook limits `unanswerable` to a period entirely outside the data or information the business never records; the first is checkable, so code checks it.
+
+**Trade-off.** "The business never records this" cannot be confirmed by code, so those cases now end as abstentions (0) instead of a possible +1. No such case was answered correctly before the change, so nothing measured was lost. Reference answers of type `unanswerable` are 70 of 3,000 training questions.
+
+**Evidence.** `unanswerable` answers on the 39 questions fell from 11 to 1, and that one is correct. Wrong answers fell from 19 to 12.
+
+### 2.8 Refuse queries that use the system date
+
+**Decision.** A query that references `CURRENT_DATE`, `now()`, `today()` or similar is rejected with a pointer to the Dates block.
+
+**Why.** Relative time must be resolved against `as_of_date`, never the system date. The model used `CURRENT_DATE` in a "this month" question; the query ran, matched nothing, and produced a wrong `unanswerable`. A rejected query gives the model a reason to correct itself, which a silent empty result does not.
+
+### 2.9 Several numbers are a list; a table needs a named object
+
+**Decision.** A table body written beside `"type"` is moved under `"answer"`. A one-row table whose cells are all numbers becomes a list. Invalid answers get feedback that shows the valid shapes.
+
+**Why.** For a stock question the model had the right two numbers and returned them five times as a malformed table until the step limit. The rulebook says several numbers asked together are a list in the order asked, and a table has one named object per row with the name first. A one-row, all-number table therefore has no valid reading as a table.
+
+### 2.10 Resolve the date phrases found in each question
+
+**Decision.** Besides the general Dates block, the prompt lists each relative date phrase that occurs in the question ("bữa qua", "tuần rồi", "7 ngày gần nhất", …) with its explicit date or range. Phrases are matched on accent-folded words.
+
+**Why.** After an unrelated instruction edit, the model read "bữa qua" (yesterday) as a seven-day range, although the Dates block listed it. For a fixed prompt the model's output is the same on every run, so this was prompt sensitivity, not chance: any edit can flip borderline questions. Stating the phrase's meaning next to the question makes the answer depend less on the rest of the prompt. Relative dates occur in about 20% of training questions.
 
 ## 3. Decisions in the preparation layer
 
@@ -161,9 +193,15 @@ The 10 questions were used to find problems, so their score is not an accuracy e
 
 **Why.** The debt rules need the payment method and channel, and these columns previously had no role, so no rule could depend on them.
 
+### 3.10 Use the day of the order timestamp when no order date is recorded
+
+**Decision.** When an order table has an order timestamp but no order date column, `semantic.orders` and the sales lines carry `order_date` as the day of that timestamp.
+
+**Why.** The rulebook assigns an order to a period by the day it was placed. One sample business records only a timestamp. Its relations then had no `order_date`, so the query patterns did not apply, the data range was unknown (which made the check in 2.7 impossible there), and the model compared the timestamp with whole dates, which drops every sale after midnight on the last day of a range.
+
 ## 4. How this was checked
 
-- Scripted tests: `make test` (invented data only). The preparation suite has one failure that predates this work (`test_compatible_partition_scales_and_missing_optional_field`).
+- Scripted tests: `make test` (invented data only). New tests cover the status mapping, relation names, header evidence, group inheritance, serial-date corroboration, the sales, debt and stock relations, the query guard, the answer format rules, date phrases, and the answering loop with a scripted model (`tests/preparation/test_business_views.py`, `tests/preparation/test_sql_agent.py`). The preparation suite has one failure that predates this work (`test_compatible_partition_scales_and_missing_optional_field`).
 - Training data, development use: the 10 sample questions and 39 other questions, as in section 1. Reference answers were read only by the scorer after inference, and by hand-written checks of the relations.
 - Query guard: tested with the rejected statements listed in 2.2.
 
@@ -174,8 +212,10 @@ The 10 questions were used to find problems, so their score is not an accuracy e
 - The internal scorer may differ from the official one.
 - Only one model was measured. Earlier analysis found the model, not the data, to be the largest factor in accuracy.
 
-## 6. Known remaining failures (39 other questions)
+## 6. Known remaining failures (39 other questions, final measurement)
 
-- About half of the wrong answers are `unanswerable` given after a query matched nothing because of a wrong filter.
-- Others are question types with no rulebook-ready relation yet: share of revenue by product group, change against the previous period, morning and afternoon shift, top products, price-change effect.
+12 wrong and 8 abstained. Of the abstentions, 6 were the model's own choice after failed queries and 2 hit the step limit.
+
+- Most failures are question types with no rulebook-ready relation yet: share of revenue by product group, change against the previous period, morning and afternoon shift, top products, customers by number of orders, price-change effect.
 - A few are format slips, such as a correct percentage returned with type `number`.
+- The model is sensitive to prompt wording (section 2.10). Any prompt change needs both question sets re-measured.

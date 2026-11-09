@@ -802,6 +802,9 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
                '(NOT f.cancelled AND NOT f.returned) AS counts_as_sale')
     if primary:
         selected = ','.join(f'b.{_q(column)} AS {_q(role)}' for role, column in roles.items())
+        if 'order_date' not in roles and 'created_at' in roles:
+            # The rulebook assigns an order to a period by the day it was placed.
+            selected += f', CAST(b.{_q(roles["created_at"])} AS DATE) AS order_date'
         sql = f'SELECT {selected}, {derived}'
         source = f' FROM {bq} b JOIN private.order_flags f ON b.{_q(oid)}=f.order_id'
         if item and 'line_amount' in item['roles'] and 'revenue' not in roles:
@@ -811,13 +814,17 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
                        f'FROM {_relation_sql(item)} GROUP BY 1) x ON b.{_q(oid)}=x.id')
         sql += source
     else:
-        when = roles.get('order_date')
-        if not when:
+        date_column = roles.get('order_date') or roles.get('created_at')
+        if not date_column:
             issue('ORDER_GRAIN_UNRESOLVED', 'Line-based orders have no verified order date.', base['name'])
             return semantic
-        missing_test = 'count(' + _q(when) + ')=0' if inheritance else 'count(' + _q(when) + ')<>count(*)'
+        # Without a date column, the day of the order timestamp is the order date.
+        order_day = lambda prefix='': (f'{prefix}{_q(date_column)}' if roles.get('order_date')
+                                       else f'CAST({prefix}{_q(date_column)} AS DATE)')
+        when = order_day()
+        missing_test = 'count(' + when + ')=0' if inheritance else 'count(' + when + ')<>count(*)'
         conflicts = connection.execute(f'SELECT count(*) FROM (SELECT {_q(oid)} FROM {bq} GROUP BY 1 '
-            f'HAVING count(DISTINCT {_q(when)})<>1 OR {missing_test})').fetchone()[0]
+            f'HAVING count(DISTINCT {when})<>1 OR {missing_test})').fetchone()[0]
         if conflicts:
             issue('ORDER_GRAIN_UNRESOLVED', 'Order dates are missing or do not functionally depend on order IDs.', base['name'], conflicts)
             return semantic
@@ -829,7 +836,7 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
                                              f'HAVING count(DISTINCT {_q(column)})>1)').fetchone()[0] == 0:
                 carried.append(f'MIN(b.{_q(column)}) AS {_q(role)}')
         amount = f', SUM(b.{_q(roles["line_amount"])}) AS revenue' if 'line_amount' in roles else ''
-        sql = (f'SELECT b.{_q(oid)} order_id, MIN(b.{_q(when)}) order_date' + ''.join(', ' + c for c in carried) + amount +
+        sql = (f'SELECT b.{_q(oid)} order_id, MIN({order_day("b.")}) order_date' + ''.join(', ' + c for c in carried) + amount +
                ', bool_or(f.cancelled) cancelled, bool_or(f.returned) returned, '
                "CASE WHEN bool_or(f.cancelled) THEN 'cancelled' WHEN bool_or(f.returned) THEN 'returned' "
                "WHEN bool_or(f.shipping) THEN 'shipping' ELSE 'completed' END AS order_state, "

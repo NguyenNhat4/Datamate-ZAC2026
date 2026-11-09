@@ -10,7 +10,7 @@ from tabular_agent.preparation.contracts import BusinessProfile
 from tabular_agent.preparation.pipeline import (
     _documented_header, _inherit_group_values, _relation_base, _schema, _sequence_epoch)
 from tabular_agent.preparation.semantics import canonical_status, map_status_labels
-from tabular_agent.sql_agent import QueryRejected, check_query, date_block, normalize_answer
+from tabular_agent.sql_agent import QueryRejected, check_query, date_block, date_phrases, normalize_answer
 
 
 RULES = """
@@ -165,6 +165,19 @@ class BusinessViews(unittest.TestCase):
                                 "WHERE order_date = DATE '2025-01-01'").fetchone()[0]
         self.assertEqual(total, Decimal(100))
 
+    def test_order_date_is_the_day_of_the_order_timestamp_when_no_date_is_recorded(self):
+        self.table("orders", "order", {"order_id": "VARCHAR", "created_at": "TIMESTAMP", "status": "VARCHAR"},
+                   [("1", "2025-01-31 23:30:00", "completed"), ("2", "2025-02-01 00:10:00", "cancelled")], ["order_id"])
+        self.table("items", "order_item", {"order_id": "VARCHAR", "line_number": "VARCHAR", "product_name": "VARCHAR",
+                                           "quantity": "DECIMAL(20,0)", "line_amount": "DECIMAL(20,0)"},
+                   [("1", "1", "A", 1, 60), ("2", "1", "A", 1, 40)], ["order_id", "line_number"])
+        _schema(self.db, self.profile, self.relations, "", RULES)
+        self.assertEqual(self.db.execute("SELECT order_id, order_date FROM semantic.orders ORDER BY 1").fetchall(),
+                         [("1", date(2025, 1, 31)), ("2", date(2025, 2, 1))])
+        january = self.db.execute("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines "
+                                  "WHERE order_date BETWEEN DATE '2025-01-01' AND DATE '2025-01-31'").fetchone()[0]
+        self.assertEqual(january, Decimal(60))
+
     def test_debt_follows_the_rulebook_definition(self):
         self.credit_shop()
         schema = _schema(self.db, self.profile, self.relations, "", RULES)
@@ -254,6 +267,22 @@ class AnswerFormat(unittest.TestCase):
         self.assertEqual(normalize_answer({"type": "number", "answer": 70712.0})["answer"], 70712)
         self.assertEqual(normalize_answer({"type": "percent", "answer": 12.345})["answer"], 12.35)
         self.assertEqual(normalize_answer({"type": "abstain", "reason": "x"}), {"type": "abstain", "reason": "x"})
+
+    def test_date_phrases_in_a_question_are_resolved_without_accents(self):
+        self.assertEqual(date_phrases("ee cho toi biet dthu bua qua", "2025-10-25"),
+                         ['- "bua qua" means yesterday: the single day 2025-10-24'])
+        lines = date_phrases("Doanh thu tuần rồi so với 7 ngày gần nhất?", "2025-07-25")
+        self.assertIn('- "tuan roi" means last week: 2025-07-14 to 2025-07-20', lines)
+        self.assertIn('- "7 ngay gan nhat" means the last 7 days: 2025-07-19 to 2025-07-25', lines)
+        self.assertEqual(date_phrases("Doanh thu tháng 3/2025?", "2025-07-25"), [])
+
+    def test_several_numbers_are_a_list_and_a_table_needs_a_named_object(self):
+        misplaced = {"type": "table", "columns": ["whole", "loose"], "rows": [[13, 2]]}
+        self.assertEqual(normalize_answer(misplaced), {"type": "list", "answer": [13, 2]})
+        named = {"type": "table", "columns": ["name", "debt"], "rows": [["A", "100"]]}
+        self.assertEqual(normalize_answer(named), {"type": "table", "answer": {"columns": ["name", "debt"], "rows": [["A", 100]]}})
+        several = {"type": "table", "answer": {"columns": ["a", "b"], "rows": [[1, 2], [3, 4]]}}
+        self.assertEqual(normalize_answer(several)["type"], "table")
 
     def test_relative_periods_follow_the_reference_date(self):
         text = date_block("2025-07-25")

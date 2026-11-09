@@ -58,7 +58,7 @@ Observed event ranges are distinct from declared source coverage. Inventory snap
 
 | Relation | Meaning |
 |---|---|
-| `semantic.orders` | Every order, one row each, with `order_state` (`completed`, `shipping`, `cancelled`, `returned`), `counts_as_sale` and order `revenue` |
+| `semantic.orders` | Every order, one row each, with `order_state` (`completed`, `shipping`, `cancelled`, `returned`), `counts_as_sale`, order `revenue`, and `order_date` (the day of the order timestamp when no date is recorded) |
 | `semantic.eligible_orders` | Orders that count for revenue and order counts |
 | `semantic.eligible_sales_lines` | Sales lines of those orders, each carrying `order_date`; for a book with no order IDs, the rows that are neither cancelled nor returned |
 | `semantic.product_quantities` | Those lines with `base_quantity` and the product's `base_unit` |
@@ -83,7 +83,9 @@ make prepare OUT=artifacts/prepared
 make bench-local LIMIT=10 ARGS="--prepared artifacts/prepared --max-steps 6"
 ```
 
-The model receives the rulebook, the business README, the schema (semantic relations first, with query patterns for the relations the bundle has), explicit date ranges derived from `as_of_date`, the observed sales date range and the question. It writes one `SELECT` at a time and sees bounded results. Queries run read-only with external access disabled and are checked against the published relations and table functions; private audit tables, other table functions and non-`SELECT` statements are rejected. Label columns with at most 12 distinct values show those values; names, identifiers and free text never do. A business with no bundle is answered with an abstention. Numeric text in a final answer is converted to JSON numbers.
+The model receives the rulebook, the business README, the schema (semantic relations first, with query patterns for the relations the bundle has), explicit date ranges derived from `as_of_date`, the observed sales date range and the question. It writes one `SELECT` at a time and sees bounded results. Queries run read-only with external access disabled and are checked against the published relations and table functions; private audit tables, other table functions and non-`SELECT` statements are rejected. Label columns with at most 12 distinct values show those values; names, identifiers and free text never do. A business with no bundle is answered with an abstention.
+
+Three answer rules are applied in code, not left to the model. `unanswerable` is accepted only when the asked period lies entirely outside the data's sales dates; otherwise the model gets one correction and then the answer becomes an abstention. Queries that use the system date are rejected. Numeric text becomes JSON numbers, and a one-row table of numbers becomes a list. The reasons are in the [decision record](fix/2026-11-09_sql_answering_accuracy/README.md).
 
 ## Bundle contents and statuses
 
