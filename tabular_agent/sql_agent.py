@@ -148,6 +148,69 @@ class QueryRejected(ValueError):
     """A generated query is not a single allowlisted SELECT."""
 
 
+# A cleaned relation of an order, order-line or sale-recording grain holds sales records when it records a sale
+# fact or amount; one that records none (a delivery book, a credit-terms sheet) does not. An unclassified relation
+# holds sales records when it carries a sales amount or an order id and no purchase-receipt column.
+_SALES_GRAINS = frozenset({'order', 'order_item', 'sale_recording'})
+_SALE_FACTS = frozenset({'status', 'order_date', 'created_at', 'line_amount', 'unit_price', 'order_goods_amount',
+                         'order_total'})
+_SALES_ROLES = frozenset({'order_id', 'line_amount', 'unit_price', 'order_goods_amount', 'order_total'})
+_RECEIPT_ROLES = frozenset({'receipt_id', 'receipt_date', 'receipt_amount'})
+UNREADY_REASON = 'sales data is not rulebook-ready'
+
+
+def _roles(relation):
+    return {column.get('role') for column in relation.get('columns', [])}
+
+
+def unready_sales_relations(schema):
+    """Name the cleaned sales relations that the rulebook could not be applied to.
+
+    Args:
+        schema: Parsed ``schema.json`` dictionary of one bundle.
+
+    Returns:
+        Set of lower-case ``clean.*`` relation names. It is empty when the
+        bundle publishes ``semantic.eligible_sales_lines``. Otherwise it holds
+        every cleaned relation of an order, order-line or sale-recording grain
+        that records a sale fact or amount, and every unclassified relation
+        with a sales amount or order id and no purchase-receipt column. These
+        relations apply no order eligibility (cancellations, returns,
+        unfinished orders), so totals read from them are not the rulebook's
+        figures.
+    """
+    relations = schema.get('relations', [])
+    if any(relation['name'] == 'semantic.eligible_sales_lines' for relation in relations):
+        return set()
+    unready = set()
+    for relation in relations:
+        if relation['name'].startswith('semantic.'):
+            continue
+        roles, grain = _roles(relation), relation.get('grain')
+        if ((grain in _SALES_GRAINS and roles & _SALE_FACTS)
+                or (grain == 'unknown' and roles & _SALES_ROLES and not roles & _RECEIPT_ROLES)):
+            unready.add(relation['name'].lower())
+    return unready
+
+
+def _ready_orders(schema):
+    """Return the published rulebook-ready order relation (semantic.eligible_orders), or None."""
+    return next((relation for relation in schema.get('relations', [])
+                 if relation['name'] == 'semantic.eligible_orders'), None)
+
+
+def _unready_refusal(name, orders_ready):
+    if orders_ready:
+        return (f'{name} holds sales records that preparation could not make rulebook-ready. Do not query it. '
+                'Order counts, cancelled orders and order revenue come from semantic.orders and '
+                'semantic.eligible_orders, which apply the rulebook. If the question needs individual sales lines '
+                f'(quantities, products, prices), answer {{"type": "abstain", "reason": "{UNREADY_REASON}"}}.')
+    return (f'{name} holds sales records that preparation could not make rulebook-ready: cancelled, returned '
+            'and unfinished orders are not separated, so revenue, order counts, quantities sold and rankings '
+            'read from it are wrong. Do not query it. If the question needs sales records, answer '
+            f'{{"type": "abstain", "reason": "{UNREADY_REASON}"}}.')
+
+
 def find_bundles(root):
     """Map business directory names to prepared bundle paths.
 
@@ -191,13 +254,18 @@ def _walk(node, tables, ctes, functions):
             _walk(value, tables, ctes, functions)
 
 
-def check_query(connection, sql, allowed):
+def check_query(connection, sql, allowed, refused=(), orders_ready=False):
     """Reject anything except one SELECT over allowlisted relations.
 
     Args:
         connection: DuckDB connection used only to parse the statement.
         sql: Generated SQL text.
         allowed: Set of lower-case ``schema.table`` names the agent may read.
+        refused: Lower-case ``schema.table`` names that exist but must not be
+            read (see unready_sales_relations); a query naming one is rejected
+            with the reason and an instruction to abstain.
+        orders_ready: True when the bundle publishes rulebook-ready orders; the
+            refusal then points to them for order-level questions.
 
     Returns:
         The SQL text with surrounding whitespace and a trailing semicolon removed.
@@ -223,6 +291,7 @@ def check_query(connection, sql, allowed):
     tables, ctes, functions = [], set(), []
     _walk(parsed, tables, ctes, functions)
     basenames = {name.split('.', 1)[1] for name in allowed}
+    refused_names = {name.split('.', 1)[1]: name for name in refused}
     for schema, name in functions:
         if f'{schema}.{name}' not in allowed and not (not schema and name in basenames):
             raise QueryRejected('Table functions are not allowed; query the listed relations')
@@ -230,6 +299,9 @@ def check_query(connection, sql, allowed):
         schema, table = schema.lower(), table.lower()
         if catalog:
             raise QueryRejected('Catalog-qualified names are not allowed')
+        if f'{schema}.{table}' in refused or (not schema and table not in ctes and table not in basenames
+                                               and table in refused_names):
+            raise QueryRejected(_unready_refusal(f'{schema}.{table}' if schema else refused_names[table], orders_ready))
         if schema:
             if f'{schema}.{table}' not in allowed:
                 raise QueryRejected(f'Relation {schema}.{table} is not in the schema')
@@ -251,7 +323,7 @@ def _cell(value):
 _TIMES_100 = re.compile(r'(?<![\w.])100(?:\.0*)?\s*\*|\*\s*100(?:\.0*)?(?![\w.])')
 
 
-def run_query(connection, sql, allowed, cells=None, percent_cells=None):
+def run_query(connection, sql, allowed, cells=None, percent_cells=None, refused=(), orders_ready=False):
     """Run one checked query and return a bounded text result.
 
     Args:
@@ -262,6 +334,8 @@ def run_query(connection, sql, allowed, cells=None, percent_cells=None):
         percent_cells: Optional list replaced with the shown numeric cells that
             are already percentages: those of a column named like ``*percent*``,
             or every numeric cell when the query multiplies by 100.
+        refused: Relation names that must not be read; passed to check_query.
+        orders_ready: Passed to check_query.
 
     Returns:
         Text with the column names, up to MAX_ROWS rows and the total row
@@ -271,7 +345,7 @@ def run_query(connection, sql, allowed, cells=None, percent_cells=None):
         QueryRejected: The query fails the allowlist check.
         duckdb.Error: The query is invalid or was interrupted at the time limit.
     """
-    sql = check_query(connection, sql, allowed)
+    sql = check_query(connection, sql, allowed, refused, orders_ready)
     timer = threading.Timer(QUERY_SECONDS, connection.interrupt)
     timer.start()
     try:
@@ -323,7 +397,11 @@ def describe_schema(connection, schema, question=None):
         the relations this bundle has and the observed sales date range; and
         the set of lower-case allowlisted relation and function names. Label
         columns with at most MAX_LABELS distinct values list those values;
-        identifier, name and free-text columns never do.
+        identifier, name and free-text columns never do. Relations named by
+        unready_sales_relations are listed by name only, with the instruction
+        to abstain (or, when rulebook-ready orders exist, to use them), and are
+        not in the allowlist. Order-grain relations without sale facts in such
+        a bundle carry a note on what they can answer.
     """
     allowed = set()
     quoted = lambda name: '.'.join('"' + part.replace('"', '""') + '"' for part in name.split('.'))
@@ -350,11 +428,17 @@ def describe_schema(connection, schema, question=None):
         withheld = relation.get('blocked_columns') or []
         if withheld:
             lines.append('  Withheld (failed cleaning, cannot be queried): ' + ', '.join(str(item) for item in withheld))
+        if name.lower() in limited:
+            lines.append('  Records no sale amounts or sale dates: use it only for what it records (for example '
+                         'delivery rounds or credit terms), never for revenue, order counts or quantities sold.')
         return lines + ['']
 
     relations = schema.get('relations', [])
+    unready = unready_sales_relations(schema)
+    limited = {relation['name'].lower() for relation in relations if unready and relation.get('grain') in _SALES_GRAINS
+               and relation['name'].startswith('clean.') and relation['name'].lower() not in unready}
     semantic = [r for r in relations if r['name'].startswith('semantic.')]
-    clean = [r for r in relations if not r['name'].startswith('semantic.')]
+    clean = [r for r in relations if not r['name'].startswith('semantic.') and r['name'].lower() not in unready]
     lines = []
     if semantic:
         lines += ['## Rulebook-ready relations (use these first)', '']
@@ -363,6 +447,29 @@ def describe_schema(connection, schema, question=None):
     lines += ['## Cleaned source tables', '']
     for relation in clean:
         lines += render(relation)
+    if unready:
+        abstain = f'{{"type": "abstain", "reason": "{UNREADY_REASON}"}}'
+        price = ('The current price or cost in a catalogue is not the selling price on a past date.')
+        orders = _ready_orders(schema)
+        lines += ['## Sales tables that cannot be used', '']
+        if orders:
+            columns = {column['name'] for column in orders.get('columns', [])}
+            lines.append('These sales tables are not rulebook-ready and cannot be queried: ' + ', '.join(sorted(unready))
+                         + '. semantic.orders and semantic.eligible_orders above apply the rulebook: use them for '
+                         'order counts, cancelled orders and order revenue.')
+            if 'order_goods_amount' in columns and 'revenue' not in columns and 'order_date' in columns:
+                lines.append('Revenue (doanh thu) in a period is the goods amount of eligible orders:\n  '
+                             'SELECT SUM(order_goods_amount) FROM semantic.eligible_orders '
+                             "WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'")
+            lines += ['A question that needs individual sales lines (quantities sold, best-selling products, revenue '
+                      f'of a product or group, the selling price on a date) cannot be answered here: answer {abstain}. '
+                      + price, '']
+        else:
+            lines += ['Preparation could not apply the rulebook to these sales tables (cancelled, returned and '
+                      'unfinished orders are not separated), so they cannot be queried: ' + ', '.join(sorted(unready)) + '.',
+                      'A question that needs sales records (revenue, number of orders, quantities sold, best-selling '
+                      'products, top customers, the selling price on a date) cannot be answered for this business: '
+                      f'answer {abstain}. ' + price + ' Other tables listed above can be used for what they record.', '']
     published = {relation['name']: {column['name'] for column in relation.get('columns', [])} for relation in relations}
     patterns = [f'- {title}:\n  {sql}' for name, needed, title, sql, *kind in PATTERNS
                 if name in published and set(needed) <= published[name]
@@ -716,6 +823,8 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                            f"{_FOLD_SQL.format('CAST(col AS VARCHAR)')} = {_FOLD_SQL.format('CAST(txt AS VARCHAR)')}")
         connection.execute('SET lock_configuration=true')
         schema_text, allowed = describe_schema(connection, schema, question['question'])
+        refused = unready_sales_relations(schema)
+        orders_ready = _ready_orders(schema) is not None
         coverage = sales_coverage(connection, schema)
         context = '\n\n'.join([
             '# Rulebook\n' + rulebook,
@@ -812,7 +921,7 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                     emit({'stage': 'sql', 'sql': body})
                     last_sql = body
                     try:
-                        feedback = 'Result:\n' + run_query(connection, body, allowed, cells, percent_cells)
+                        feedback = 'Result:\n' + run_query(connection, body, allowed, cells, percent_cells, refused, orders_ready)
                         succeeded = True
                         last_ok_sql = ' '.join(body.split())
                     except QueryRejected as error:

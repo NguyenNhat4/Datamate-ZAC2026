@@ -187,5 +187,28 @@ class SqlAnswering(unittest.TestCase):
         self.assertEqual(answer["type"], "abstain")
 
 
+class UnreadySalesAnswering(unittest.TestCase):
+    """The same invented bundle without semantic.eligible_sales_lines: its sales table is refused."""
+
+    setUp_bundle = SqlAnswering.setUp
+    ask = SqlAnswering.ask
+
+    def setUp(self):
+        self.setUp_bundle()
+        path = self.bundle / "schema.json"
+        schema = json.loads(path.read_text(encoding="utf-8"))
+        schema["relations"] = [r for r in schema["relations"] if r["name"] != "semantic.eligible_sales_lines"]
+        path.write_text(json.dumps(schema), encoding="utf-8")
+
+    def test_a_query_on_the_sales_table_is_refused_with_the_instruction_to_abstain(self):
+        answer, model = self.ask(sql("SELECT SUM(line_amount) FROM clean.sales"),
+                                 final({"type": "abstain", "reason": "sales data is not rulebook-ready"}))
+        self.assertEqual(answer["type"], "abstain")
+        self.assertIn("Sales tables that cannot be used", model.feedback[0])
+        self.assertNotIn("clean.sales  (one row", model.feedback[0])
+        self.assertIn("Query rejected: clean.sales holds sales records", model.feedback[1])
+        self.assertIn('"type": "abstain"', model.feedback[1])
+
+
 if __name__ == "__main__":
     unittest.main()

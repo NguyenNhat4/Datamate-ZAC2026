@@ -12,7 +12,7 @@ from tabular_agent.preparation.pipeline import (
 from tabular_agent.preparation.semantics import canonical_status, map_status_labels
 from tabular_agent.sql_agent import (
     QueryRejected, asks_percent, check_query, compares_periods, date_block, date_phrases, describe_schema, grounded,
-    normalize_answer, rescaled_percent)
+    normalize_answer, rescaled_percent, unready_sales_relations)
 
 
 RULES = """
@@ -373,6 +373,83 @@ class QueryGuard(unittest.TestCase):
                     "SELECT * FROM clean.sales WHERE d = CURRENT_DATE", "SELECT * FROM clean.sales WHERE n LIKE '%a%'"):
             with self.assertRaises(QueryRejected, msg=sql):
                 check_query(self.db, sql, self.allowed)
+
+
+def _relation(name, grain, *roles):
+    return {"name": name, "grain": grain,
+            "columns": [{"name": f"c{index}", "type": "VARCHAR", "role": role} for index, role in enumerate(roles)]}
+
+
+class UnreadySales(unittest.TestCase):
+    """Sales tables the rulebook could not be applied to are named, refused and explained."""
+
+    def setUp(self):
+        self.db = duckdb.connect()
+        self.addCleanup(self.db.close)
+        for schema in ("clean", "semantic"):
+            self.db.execute("CREATE SCHEMA " + schema)
+        for name in ("sales_book", "debt_terms", "deliveries", "stock", "purchases", "loose_sales", "warranty"):
+            self.db.execute(f"CREATE TABLE clean.{name} (c0 VARCHAR, c1 VARCHAR, c2 VARCHAR, c3 VARCHAR)")
+        self.schema = {"relations": [
+            _relation("clean.sales_book", "order_item", "order_id", "line_amount", "order_date"),
+            _relation("clean.debt_terms", "order", "order_id"),
+            _relation("clean.deliveries", "order_item", "order_id", "product_name", "base_quantity", "base_unit"),
+            _relation("clean.stock", "inventory_snapshot", "product_name", "quantity"),
+            _relation("clean.purchases", "unknown", "line_amount", "receipt_date", "product_name"),
+            _relation("clean.loose_sales", "unknown", "customer_name", "line_amount", "quantity"),
+            _relation("clean.warranty", "unknown", "customer_name", "status"),
+        ]}
+
+    def test_sales_tables_are_named_only_without_rulebook_ready_lines(self):
+        self.assertEqual(unready_sales_relations(self.schema), {"clean.sales_book", "clean.loose_sales"})
+        ready = {"relations": self.schema["relations"] + [
+            _relation("semantic.eligible_sales_lines", "order_item", "order_id", "line_amount")]}
+        self.assertEqual(unready_sales_relations(ready), set())
+
+    def test_schema_lists_them_by_name_with_the_instruction_to_abstain(self):
+        text, allowed = describe_schema(self.db, self.schema)
+        self.assertEqual(allowed, {"clean.debt_terms", "clean.deliveries", "clean.stock", "clean.purchases",
+                                   "clean.warranty"})
+        self.assertIn("## Sales tables that cannot be used", text)
+        self.assertIn("clean.loose_sales, clean.sales_book", text)
+        self.assertIn('"type": "abstain"', text)
+        self.assertIn("not the selling price on a past date", text)
+        self.assertNotIn("clean.sales_book  (one row", text)
+        # Tables without sale facts stay usable for what they record, with a note.
+        deliveries = text[text.index("clean.deliveries  (one row"):]
+        self.assertIn("never for revenue, order counts or quantities sold", deliveries.split("\n\n")[0])
+
+    def test_queries_on_them_are_refused_with_the_reason(self):
+        _, allowed = describe_schema(self.db, self.schema)
+        refused = unready_sales_relations(self.schema)
+        for sql in ("SELECT SUM(c1) FROM clean.sales_book",
+                    "SELECT COUNT(*) FROM sales_book",
+                    "WITH s AS (SELECT * FROM clean.stock) SELECT * FROM s JOIN loose_sales USING (c0)"):
+            with self.assertRaises(QueryRejected, msg=sql) as caught:
+                check_query(self.db, sql, allowed, refused)
+            self.assertIn("rulebook-ready", str(caught.exception))
+            self.assertIn("abstain", str(caught.exception))
+        check_query(self.db, "SELECT SUM(c1) FROM clean.stock", allowed, refused)
+        check_query(self.db, "SELECT COUNT(DISTINCT c0) FROM clean.deliveries", allowed, refused)
+        check_query(self.db, "WITH sales_book AS (SELECT * FROM clean.purchases) SELECT * FROM sales_book",
+                    allowed, refused)
+
+    def test_rulebook_ready_orders_answer_order_questions_and_revenue(self):
+        self.db.execute("CREATE TABLE semantic.eligible_orders (order_id VARCHAR, order_date DATE, "
+                        "order_goods_amount DECIMAL(20,0), order_total DECIMAL(20,0))")
+        orders = _relation("semantic.eligible_orders", "order", "order_id", "order_date", "order_goods_amount",
+                           "order_total")
+        for column, kind in zip(orders["columns"], ("VARCHAR", "DATE", "DECIMAL(20,0)", "DECIMAL(20,0)")):
+            column["name"], column["type"] = column["role"], kind
+        schema = {"relations": [orders] + self.schema["relations"]}
+        text, allowed = describe_schema(self.db, schema)
+        self.assertIn("semantic.eligible_orders", allowed)
+        self.assertIn("Number of orders", text)
+        self.assertIn("SELECT SUM(order_goods_amount) FROM semantic.eligible_orders", text)
+        self.assertNotIn("not separated", text)
+        with self.assertRaises(QueryRejected) as caught:
+            check_query(self.db, "SELECT SUM(c1) FROM clean.sales_book", allowed, unready_sales_relations(schema), True)
+        self.assertIn("semantic.eligible_orders", str(caught.exception))
 
 
 class AnswerFormat(unittest.TestCase):
