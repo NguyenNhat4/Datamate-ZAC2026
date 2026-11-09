@@ -45,7 +45,7 @@ class SqlAnswering(unittest.TestCase):
             db.execute("CREATE SCHEMA " + schema)
         db.execute("CREATE TABLE clean.sales(order_id VARCHAR, order_date DATE, product_name VARCHAR, line_amount DECIMAL(20,0))")
         db.executemany("INSERT INTO clean.sales VALUES (?,?,?,?)",
-                       [("1", "2025-04-01", "Trà vải", 100), ("2", "2025-04-02", "Cà phê", 50), ("3", "2025-06-30", "Trà vải", 70)])
+                       [("1", "2025-04-01", "Trà vải", 100), ("2", "2025-04-02", "Cà phê đá", 50), ("3", "2025-06-30", "Trà vải", 70)])
         db.execute("CREATE VIEW semantic.eligible_sales_lines AS SELECT * FROM clean.sales")
         db.execute("CREATE TABLE private.audit(note VARCHAR)")
         db.close()
@@ -110,6 +110,45 @@ class SqlAnswering(unittest.TestCase):
         self.assertEqual(answer["type"], "abstain")
         self.assertIn("system date", model.feedback[1])
         self.assertIn("not in the schema", model.feedback[2])
+
+    def test_number_must_be_a_value_of_the_last_result(self):
+        rate = sql("SELECT ROUND(100.0 * 70 / 220, 2) FROM semantic.eligible_sales_lines LIMIT 1")
+        answer, model = self.ask(rate, final({"type": "number", "answer": 3182}), final({"type": "number", "answer": 31.82}))
+        self.assertEqual(answer, {"type": "number", "answer": 31.82})
+        self.assertIn("not a value of the last result", model.feedback[2])
+        answer, _ = self.ask(rate, final({"type": "number", "answer": 3182}), final({"type": "number", "answer": 3182}))
+        self.assertEqual(answer["type"], "abstain")
+        empty = sql("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE order_id = 'none'")
+        answer, _ = self.ask(empty, final({"type": "number", "answer": 0}), final({"type": "number", "answer": 0}))
+        self.assertEqual(answer["type"], "abstain")
+
+    def test_a_percentage_question_gets_the_percent_type(self):
+        self.question["question"] = "Trà vải chiếm bao nhiêu phần trăm doanh thu?"
+        answer, _ = self.ask(sql("SELECT ROUND(100.0 * 170 / 220, 2) FROM semantic.eligible_sales_lines LIMIT 1"),
+                             final({"type": "number", "answer": 77.27}))
+        self.assertEqual(answer, {"type": "percent", "answer": 77.27})
+
+    def test_name_matching_ignores_accents_including_the_letter_d(self):
+        answer, _ = self.ask(sql("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE name_like(product_name, 'ca phe da')"),
+                             final({"type": "number", "answer": 50}))
+        self.assertEqual(answer, {"type": "number", "answer": 50})
+
+    def test_group_names_match_exactly_apart_from_accents(self):
+        answer, _ = self.ask(sql("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE name_is(product_name, 'tra  VAI')"),
+                             final({"type": "number", "answer": 170}))
+        self.assertEqual(answer, {"type": "number", "answer": 170})
+        # A longer name that only contains the text is a different name.
+        answer, model = self.ask(sql("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE name_is(product_name, 'ca phe')"),
+                                 final({"type": "abstain"}))
+        self.assertIn("NULL", model.feedback[1])
+
+    def test_like_is_refused_in_favour_of_name_matching(self):
+        answer, model = self.ask(
+            sql("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE product_name LIKE '%tra vai%'"),
+            sql("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE name_like(product_name, 'tra vai')"),
+            final({"type": "number", "answer": 170}))
+        self.assertEqual(answer, {"type": "number", "answer": 170})
+        self.assertIn("name_like", model.feedback[1])
 
     def test_step_limit_ends_in_an_abstention(self):
         answer, _ = self.ask(*["no block here"] * 6)

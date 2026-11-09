@@ -65,6 +65,10 @@ Observed event ranges are distinct from declared source coverage. Inventory snap
 | `semantic.debt_as_of(DATE)` | Table function: orders still owing at the end of a date |
 | `semantic.debt_repayments`, `semantic.debt_added` | Repayments after the purchase day, and new debt, of credit orders |
 | `semantic.stock_snapshot` | End-of-data stock split into whole large units and loose base units; valid only for `stock_date` |
+| `semantic.group_revenue_share(first_day, last_day)` | Table function: revenue of each product group and its `share_percent` of the whole shop's revenue in the period. Needs `product_group` on the sales lines |
+| `semantic.period_comparison(first_day, last_day, base_first_day, base_last_day)` | Table function: revenue (and order count when orders exist) of the asked period against a base period, with the difference (asked − base) and the percent change |
+| `semantic.shift_summary(first_day, last_day)` | Table function: revenue and order count of the morning and afternoon shifts, with each shift's percent difference from the morning shift. Needs the rulebook's shift hours and an order timestamp |
+| `semantic.top_products(first_day, last_day)` | Table function: products ranked by base quantity sold, ties by code (or name without codes); service-fee lines are excluded when the rulebook says they are not products |
 
 Supporting rules, all derived from the rulebook or README and never from a business or question identifier:
 

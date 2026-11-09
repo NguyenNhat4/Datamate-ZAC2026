@@ -595,6 +595,7 @@ def _relation_sql(relation):
 def _relations_and_semantics(connection, profile, relations, readme, rulebook):
     """Publish only semantic operations whose complete dependencies were checked."""
     from .semantics import map_status_labels, return_evidence_policy, sales_eligibility_policy, _words
+    from .views import line_extras, order_extras
     from .parsers import text_key
 
     def issue(code, message, relation=None, count=1):
@@ -656,6 +657,10 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
         'cancelled': 'TRUE when the order is cancelled.',
         'returned': 'TRUE when the order has any return (the whole order is excluded from sales).',
         'order_date': 'Order date; decides which period the sale belongs to.',
+        'shift': "Shift of the order time by the rulebook's hours: 'morning', 'afternoon', or NULL outside both.",
+        'customer_key': 'One value per customer (rulebook: by code, or by name ignoring spelling). NULL for a walk-in order, which is not a customer.',
+        'product_group': 'Product group from the product catalogue.',
+        'base_unit': 'Base unit of the product.',
     }
 
     def status_cases(column, relation_sql, relation_name):
@@ -718,7 +723,8 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
             return semantic
         selected = ','.join(f'{_q(column)} AS {_q(role)}' for role, column in book['roles'].items())
         sales = publish('semantic.eligible_sales_lines', 'sale_recording',
-            f"SELECT {selected} FROM {_relation_sql(book)} WHERE {state} IN ('completed','shipping')", [book],
+            line_extras(connection, relations,
+                        f"SELECT {selected} FROM {_relation_sql(book)} WHERE {state} IN ('completed','shipping')"), [book],
             'Recorded sales that count for revenue: rows that are neither cancelled nor returned. '
             'This book has no order IDs, so orders cannot be counted.', policy)
         _publish_product_quantities(connection, profile, relations, semantic, sales, readme, rulebook, publish)
@@ -842,7 +848,7 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
                "WHEN bool_or(f.shipping) THEN 'shipping' ELSE 'completed' END AS order_state, "
                '(NOT bool_or(f.cancelled) AND NOT bool_or(f.returned)) AS counts_as_sale '
                f'FROM {bq} b JOIN private.order_flags f ON b.{_q(oid)}=f.order_id GROUP BY 1')
-    order_view = publish('semantic.orders', 'order', sql, [base],
+    order_view = publish('semantic.orders', 'order', order_extras(connection, relations, rulebook, sql), [base],
                         'Every order, one row each, with its rulebook state. Filter counts_as_sale for ordinary '
                         "revenue and order counts; use order_state='cancelled' to count cancelled orders.", keys=['order_id'])
     eligible = publish('semantic.eligible_orders', 'order',
@@ -850,12 +856,14 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
         'Orders that count for revenue and order counts (not cancelled, not returned). One row per order.', policy, ['order_id'])
     if item:
         selected = [f'i.{_q(column)} AS {_q(role)}' for role, column in item['roles'].items()]
-        for role in ('order_date', 'customer_id', 'customer_name', 'payment_method', 'channel', 'employee'):
+        for role in ('order_date', 'customer_id', 'customer_name', 'customer_key', 'payment_method', 'channel',
+                     'employee', 'shift'):
             if role not in item['roles'] and role in order_view['roles']:
                 selected.append(f'o.{_q(role)} AS {_q(role)}')
         sales = publish('semantic.eligible_sales_lines', 'order_item',
-            f'SELECT {",".join(selected)} FROM {_relation_sql(item)} i JOIN semantic.eligible_orders o '
-            f'ON i.{_q(item["roles"]["order_id"])}=o.order_id', [item, order_view],
+            line_extras(connection, relations,
+                        f'SELECT {",".join(selected)} FROM {_relation_sql(item)} i JOIN semantic.eligible_orders o '
+                        f'ON i.{_q(item["roles"]["order_id"])}=o.order_id'), [item, order_view],
             'Sales lines of orders that count for revenue; SUM(line_amount) over a date range is the revenue.', policy)
         _publish_product_quantities(connection, profile, relations, semantic, sales, readme, rulebook, publish)
     return semantic
@@ -1000,9 +1008,10 @@ def _publish_product_quantities(connection, profile, relations, semantic, sales,
 def _schema(connection, profile, relations, readme, rulebook):
     from .parsers import text_key
     semantic = _relations_and_semantics(connection, profile, relations, readme, rulebook)
-    from .views import publish_debt_views, publish_stock_view, snapshot_dates
+    from .views import publish_debt_views, publish_period_functions, publish_stock_view, snapshot_dates
     semantic = semantic + publish_debt_views(connection, relations, semantic, rulebook)
     semantic = semantic + publish_stock_view(connection, relations, readme, snapshot_dates(relations, readme))
+    semantic = semantic + publish_period_functions(connection, semantic, rulebook)
     by_name = {r['name']: r for r in relations + semantic}
     clean_roles = {role for r in relations for role in r['roles']}
     documented_roles, populated_roles, blocked_roles = set(), set(), set()

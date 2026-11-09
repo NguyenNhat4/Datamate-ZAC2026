@@ -42,6 +42,8 @@ Rules:
 - Filter text labels only with values shown in "Observed labels" or returned by a query.
 - To match a product or customer named in the question, use name_like(column, 'text'): it ignores accents and
   letter case, for example WHERE name_like(product_name, 'trà vải'). Never compare names with = or LIKE.
+  For a product group use name_is(product_group, 'text'): the exact group name, ignoring accents and letter case;
+  groups with similar names (trà, trà sữa) are different groups.
 - Questions are often typed without accents or with chat abbreviations: hnay = hôm nay, hqua = hôm qua,
   dthu = doanh thu, bn = bao nhiêu, sp = sản phẩm, dc/đc = được, ko/k = không, kh = khách hàng, sl = số lượng.
 - If the asked period lies entirely outside "Data coverage", answer
@@ -57,23 +59,70 @@ Rules:
 - Give the final answer only from a query result you have seen, copying the value exactly.
 """
 
+# (relation, columns the pattern needs, what it answers, query). A pattern is shown only when the bundle has them.
 PATTERNS = (
-    ('semantic.eligible_sales_lines', 'Revenue (doanh thu, tiền bán, bán được bao nhiêu tiền) in a period',
+    ('semantic.eligible_sales_lines', ('line_amount', 'order_date'),
+     'Revenue (doanh thu, tiền bán, bán được bao nhiêu tiền) in a period',
      "SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
-    ('semantic.eligible_orders', 'Number of orders (số đơn) in a period',
+    ('semantic.eligible_sales_lines', ('line_amount', 'order_date'),
+     'Day with the highest revenue in a period, answer type date',
+     "SELECT order_date FROM semantic.eligible_sales_lines WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' "
+     "GROUP BY order_date ORDER BY SUM(line_amount) DESC, order_date LIMIT 1"),
+    ('semantic.period_comparison', ('revenue_change_percent',),
+     'Change of revenue against the previous period or the same period earlier (so với tháng trước / cùng kỳ, '
+     'tăng hay giảm bao nhiêu %), answer type percent; asked period first, base period second, both from the Dates block. '
+     'Use revenue_difference for a difference in money, orders_change_percent for orders',
+     "SELECT revenue_change_percent FROM semantic.period_comparison(DATE '2025-06-01', DATE '2025-06-30', DATE '2025-05-01', DATE '2025-05-31')"),
+    ('semantic.group_revenue_share', ('share_percent',),
+     'Share of revenue of one product group (nhóm hàng ... chiếm bao nhiêu %, tỉ trọng nhóm), answer type percent',
+     "SELECT share_percent FROM semantic.group_revenue_share(DATE '2025-06-01', DATE '2025-06-30') WHERE name_is(product_group, 'tên nhóm')"),
+    ('semantic.shift_summary', ('revenue', 'orders'),
+     "Revenue or order count of one shift (ca sáng = 'morning', ca chiều = 'afternoon'); use orders for số đơn / bill",
+     "SELECT revenue FROM semantic.shift_summary(DATE '2025-06-01', DATE '2025-06-30') WHERE shift = 'morning'"),
+    ('semantic.shift_summary', ('revenue_vs_morning_percent',),
+     'Afternoon shift compared with the morning shift in percent (ca chiều so với ca sáng chênh bao nhiêu %), answer type '
+     'percent; use orders_vs_morning_percent for the order count',
+     "SELECT revenue_vs_morning_percent FROM semantic.shift_summary(DATE '2025-06-01', DATE '2025-06-30') WHERE shift = 'afternoon'"),
+    ('semantic.eligible_orders', ('order_date',), 'Number of orders (số đơn) in a period',
      "SELECT COUNT(*) FROM semantic.eligible_orders WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
-    ('semantic.eligible_orders', 'Average revenue per order (doanh thu bình quân mỗi đơn)',
+    ('semantic.eligible_orders', ('order_date', 'revenue'), 'Average revenue per order (doanh thu bình quân mỗi đơn)',
      "SELECT ROUND(SUM(revenue) / COUNT(*)) FROM semantic.eligible_orders WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
-    ('semantic.orders', 'Cancelled orders (đơn huỷ) in a period; all orders regardless of state use no state filter',
+    ('semantic.eligible_orders', ('order_date', 'customer_key'),
+     'Customers by number of orders (walk-in orders have no customer_key and are not customers); here: customers with at least 3 orders',
+     "SELECT COUNT(*) FROM (SELECT customer_key FROM semantic.eligible_orders WHERE customer_key IS NOT NULL "
+     "AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' GROUP BY customer_key HAVING COUNT(*) >= 3)"),
+    ('semantic.eligible_orders', ('order_date', 'customer_key', 'customer_name'),
+     'Customer with the most orders (use SUM(revenue) for the customer who bought the most money), answer type string',
+     "SELECT MIN(customer_name) FROM semantic.eligible_orders WHERE customer_key IS NOT NULL "
+     "AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' GROUP BY customer_key ORDER BY COUNT(*) DESC, customer_key LIMIT 1"),
+    ('semantic.orders', ('order_date', 'order_state'),
+     'Cancelled orders (đơn huỷ) in a period',
      "SELECT COUNT(*) FROM semantic.orders WHERE order_state = 'cancelled' AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
-    ('semantic.product_quantities', 'Units sold of a base unit (bán được bao nhiêu <đơn vị>), all products with that base unit',
+    ('semantic.orders', ('order_date', 'order_state'),
+     'Cancellation rate (tỉ lệ đơn huỷ): cancelled orders over all orders of every state, answer type percent',
+     "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_state = 'cancelled') / COUNT(*), 2) FROM semantic.orders "
+     "WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
+    ('semantic.product_quantities', ('base_quantity', 'base_unit', 'order_date'),
+     'Units sold of a base unit (bán được bao nhiêu <đơn vị>), all products with that base unit',
      "SELECT SUM(base_quantity) FROM semantic.product_quantities WHERE base_unit = 'gói' AND order_date = DATE '2025-06-30'"),
-    ('semantic.debt_as_of', 'Total customer debt at the end of a date (còn nợ tính đến hết ngày X)',
+    ('semantic.product_quantities', ('base_quantity', 'product_name', 'order_date'),
+     'Units sold of one named product (bán được mấy kg / ly / phần <tên hàng>); base_quantity is already in the base unit',
+     "SELECT SUM(base_quantity) FROM semantic.product_quantities WHERE name_like(product_name, 'tên hàng') "
+     "AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
+    ('semantic.top_products', ('rank', 'product_name'),
+     'Best-selling products (bán chạy nhất, bán nhiều nhất, hot nhất, top k): answer type list of the names in rank order; '
+     'a question about the single best seller (mặt hàng nào) is answer type string',
+     "SELECT product_name FROM semantic.top_products(DATE '2025-06-01', DATE '2025-06-30') WHERE rank <= 3 ORDER BY rank"),
+    ('semantic.debt_as_of', (), 'Total customer debt at the end of a date (còn nợ tính đến hết ngày X)',
      "SELECT SUM(outstanding) FROM semantic.debt_as_of(DATE '2025-06-30')"),
-    ('semantic.debt_repayments', 'Debt repaid / collected in a period (trả nợ, thu nợ, thu hồi công nợ)',
+    ('semantic.debt_repayments', (), 'Debt repaid / collected in a period (trả nợ, thu nợ, thu hồi công nợ)',
      "SELECT SUM(amount) FROM semantic.debt_repayments WHERE repayment_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
-    ('semantic.stock_snapshot', 'Stock of a product in large units (còn mấy hộp chẵn, mấy cái lẻ), answer as list [whole, loose]',
+    ('semantic.stock_snapshot', ('whole_large_units',),
+     'Stock of a product in large units (còn mấy hộp chẵn, mấy cái lẻ), answer as list [whole, loose]',
      "SELECT whole_large_units, loose_base_units FROM semantic.stock_snapshot WHERE name_like(product_name, 'tên hàng')"),
+    ('semantic.stock_snapshot', ('stock_base_units',),
+     'Stock of a product at the end of stock_date (tồn kho cuối ngày); valid only when the asked date equals stock_date',
+     "SELECT stock_base_units, stock_date FROM semantic.stock_snapshot WHERE name_like(product_name, 'tên hàng')"),
 )
 
 
@@ -147,8 +196,12 @@ def check_query(connection, sql, allowed):
     sql = sql.strip().rstrip(';').strip()
     if not sql:
         raise QueryRejected('Empty query')
-    if _SYSTEM_DATE.search(re.sub(r"'(?:[^']|'')*'", "''", sql)):
+    bare = re.sub(r"'(?:[^']|'')*'", "''", sql)
+    if _SYSTEM_DATE.search(bare):
         raise QueryRejected('The system date is not allowed; use the explicit dates from the Dates block')
+    if re.search(r'\b(?:i?like|similar\s+to)\b', bare, re.I):
+        raise QueryRejected("LIKE is not allowed because it misses accents and spelling; "
+                            "match names with name_like(column, 'text')")
     parsed = json.loads(connection.execute('SELECT json_serialize_sql(?)', [sql]).fetchone()[0])
     if parsed.get('error'):
         raise QueryRejected(parsed.get('error_message') or 'Only SELECT statements are allowed')
@@ -181,13 +234,14 @@ def _cell(value):
     return text if len(text) <= 80 else text[:77] + '...'
 
 
-def run_query(connection, sql, allowed):
+def run_query(connection, sql, allowed, cells=None):
     """Run one checked query and return a bounded text result.
 
     Args:
         connection: Read-only DuckDB connection to the bundle.
         sql: Generated SQL text.
         allowed: Allowlisted ``schema.table`` names.
+        cells: Optional list replaced with the numeric cells of the shown rows.
 
     Returns:
         Text with the column names, up to MAX_ROWS rows and the total row
@@ -208,6 +262,10 @@ def run_query(connection, sql, allowed):
         total = MAX_ROWS + len(cursor.fetchall()) + 1 if more else len(rows)
     finally:
         timer.cancel()
+    if cells is not None:
+        cells.clear()
+        cells.extend(value for row in rows[:MAX_ROWS] for value in row
+                     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool))
     lines = [' | '.join(columns)] + [' | '.join(_cell(value) for value in row) for row in rows[:MAX_ROWS]]
     note = f'{total} row(s)' + (f'; first {MAX_ROWS} shown' if more else '')
     if total == 0:
@@ -277,7 +335,9 @@ def describe_schema(connection, schema):
     lines += ['## Cleaned source tables', '']
     for relation in clean:
         lines += render(relation)
-    patterns = [f'- {title}:\n  {sql}' for name, title, sql in PATTERNS if name in allowed]
+    published = {relation['name']: {column['name'] for column in relation.get('columns', [])} for relation in relations}
+    patterns = [f'- {title}:\n  {sql}' for name, needed, title, sql in PATTERNS
+                if name in published and set(needed) <= published[name]]
     if patterns:
         lines += ['## Query patterns (replace dates, units and names)', *patterns, '']
     coverage = sales_coverage(connection, schema)
@@ -332,12 +392,16 @@ _PHRASES = (
     ('today', ('hom nay', 'hnay', 'bua nay', 'hom ni')),
     ('yesterday', ('hom qua', 'hqua', 'bua qua', 'hom wa', 'bua wa')),
     ('this week', ('tuan nay',)),
-    ('last week', ('tuan truoc', 'tuan roi', 'tuan vua roi', 'tuan vua qua', 'tuan qua')),
+    ('last week', ('tuan truoc', 'tuan roi', 'tuan vua roi', 'tuan vua qua', 'tuan qua', 'tuan trc')),
     ('this month', ('thang nay',)),
-    ('last month', ('thang truoc', 'thang roi', 'thang vua roi', 'thang vua qua')),
+    ('last month', ('thang truoc', 'thang roi', 'thang vua roi', 'thang vua qua', 'thang trc', 'th truoc', 'thg truoc', 'th trc')),
     ('this quarter', ('quy nay',)),
     ('this year', ('tu dau nam', 'nam nay')),
 )
+
+
+# Accent-, case- and spacing-insensitive comparison key; strip_accents keeps the letter đ, so it is folded separately.
+_FOLD_SQL = "replace(lower(strip_accents(trim(regexp_replace({}, '\\s+', ' ', 'g')))), 'đ', 'd')"
 
 
 def date_phrases(question, as_of_date):
@@ -368,9 +432,48 @@ def date_phrases(question, as_of_date):
     }
     folded = f' {_fold(question)} '
     lines = []
+
+    def year_for(start_month, year):
+        # A month or quarter named without a year is this year's unless it starts after today.
+        if year:
+            return int(year)
+        return today.year if date(today.year, start_month, 1) <= today else today.year - 1
+
+    def months(first, count):
+        end_month = first.month + count
+        last = date(first.year + (end_month - 1) // 12, (end_month - 1) % 12 + 1, 1) - timedelta(days=1)
+        return first, last
+
+    def before(first, count):
+        month = first.month - count
+        return months(date(first.year + (month - 1) // 12, (month - 1) % 12 + 1, 1), count)
+
+    def base(first, count, unit):
+        # "Cùng kỳ năm trước" compares with the same months a year earlier; otherwise the period just before.
+        if year_ago:
+            return f'the same {unit} a year earlier is {span(*months(first.replace(year=first.year - 1), count))}'
+        return f'the {unit} before it is {span(*before(first, count))}'
+
+    year_ago = re.search(r' cung ky (?:cua )?nam (?:truoc|ngoai|roi|trc) ', folded) is not None
+    named = False
+    # "thangs" is "tháng" typed with an unconverted Telex tone key.
+    for match in re.finditer(r'(?<= )(?:thang|thangs|thg|th) (\d{1,2})(?:(?: nam)? (\d{4}))?(?= )', folded):
+        month = int(match.group(1))
+        if 1 <= month <= 12:
+            first, last = months(date(year_for(month, match.group(2)), month, 1), 1)
+            lines.append(f'- "{match.group(0)}" means {span(first, last)}; {base(first, 1, "month")}')
+            named = True
+    for match in re.finditer(r'(?<= )quy (\d)(?:(?: nam)? (\d{4}))?(?= )', folded):
+        quarter = int(match.group(1))
+        if 1 <= quarter <= 4:
+            start = 3 * quarter - 2
+            first, last = months(date(year_for(start, match.group(2)), start, 1), 3)
+            lines.append(f'- "{match.group(0)}" means {span(first, last)}; {base(first, 3, "quarter")}')
+            named = True
     for name, phrases in _PHRASES:
         found = next((phrase for phrase in phrases if f' {phrase} ' in folded), None)
-        if found:
+        if found and not (named and name == 'last month'):
+            # Beside a named month, "the month before" refers to that month, not to today.
             lines.append(f'- "{found}" means {name}: {meaning[name]}')
     for count, _ in re.findall(r' (\d{1,3}) ngay (gan nhat|gan day|vua qua|qua) ', folded):
         days = int(count)
@@ -452,6 +555,31 @@ def normalize_answer(answer):
     return {**answer, 'answer': value}
 
 
+def asks_percent(question):
+    """True when the question asks for a percentage or a rate, whose answer type is percent."""
+    folded = f' {_fold(question)} '
+    if any(f' {cue} ' in folded for cue in ('phan tram', 'ti le', 'ty le', 'ti trong', 'ty trong')):
+        return True
+    return re.search(r'(?:bao nhi[eê]u|bao nhiu|bnhiu|bn|m[aấ]y|nhi[eê]u)\s*%', question.lower()) is not None
+
+
+def grounded(value, cells):
+    """True when a numeric answer is a value of the last result, exactly or rounded half-up to whole or two decimals."""
+    try:
+        answer = Decimal(str(value))
+    except ArithmeticError:
+        return False
+    for cell in cells:
+        number = Decimal(str(cell))
+        if not number.is_finite():
+            continue
+        for places in (None, '1', '0.01'):
+            candidate = number if places is None else number.quantize(Decimal(places), rounding=ROUND_HALF_UP)
+            if abs(answer - candidate) <= Decimal('0.000001'):
+                return True
+    return False
+
+
 def _block(text):
     blocks = re.findall(r'```(\w*)\s*\n(.*?)```', text or '', flags=re.S)
     if blocks:
@@ -494,8 +622,12 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                                         'autoload_known_extensions': False, 'memory_limit': '1GB', 'threads': 2})
     try:
         connection.execute("SET search_path='semantic,clean'")
-        connection.execute("CREATE TEMP MACRO name_like(col, txt) AS strip_accents(lower(CAST(col AS VARCHAR))) "
-                           "LIKE '%' || strip_accents(lower(trim(txt))) || '%'")
+        # strip_accents keeps the letter đ, so it is folded separately.
+        connection.execute("CREATE TEMP MACRO name_like(col, txt) AS "
+                           "replace(strip_accents(lower(CAST(col AS VARCHAR))), 'đ', 'd') "
+                           "LIKE '%' || replace(strip_accents(lower(trim(txt))), 'đ', 'd') || '%'")
+        connection.execute("CREATE TEMP MACRO name_is(col, txt) AS "
+                           f"{_FOLD_SQL.format('CAST(col AS VARCHAR)')} = {_FOLD_SQL.format('CAST(txt AS VARCHAR)')}")
         connection.execute('SET lock_configuration=true')
         schema_text, allowed = describe_schema(connection, schema)
         coverage = sales_coverage(connection, schema)
@@ -515,6 +647,8 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
         succeeded = False
         last_sql = ''
         unverified = 0
+        ungrounded = 0
+        cells = []
         with question_span(question):
             for step in range(1, max_steps + 1):
                 response = model.generate(messages)
@@ -549,15 +683,31 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                                         'If the period is inside the coverage, the data exists and your filters are wrong: '
                                         "match names with name_like(column, 'text'), take dates from the Dates block, and use "
                                         'only listed columns and labels. Fix the query, or answer {"type": "abstain"}.')
-                        elif succeeded or answer['type'] == 'abstain':
+                        elif answer['type'] == 'abstain':
                             return answer
-                        else:
+                        elif not succeeded:
                             feedback = 'Run a query first; answer only from a query result.'
+                        else:
+                            if answer['type'] == 'number' and asks_percent(question['question']):
+                                # The question asks for a percentage, so the answer type is percent.
+                                answer = validate_answer(normalize_answer({'type': 'percent', 'answer': answer['answer']}))
+                            values = (answer['answer'] if answer['type'] == 'list' else
+                                      [answer['answer']] if answer['type'] in ('number', 'percent') else [])
+                            numbers = [value for value in values if type(value) in (int, float)]
+                            if all(grounded(value, cells) for value in numbers):
+                                return answer
+                            ungrounded += 1
+                            if ungrounded > 1:
+                                return {'type': 'abstain', 'reason': 'Answer is not a value from the query result.'}
+                            shown = ', '.join(_cell(cell) for cell in cells[:8]) or 'no numeric value'
+                            feedback = (f'Not accepted: your answer is not a value of the last result ({shown}). '
+                                        'Do the whole calculation in SQL, including percentages and differences, '
+                                        'then copy the result value exactly. A NULL or empty result is not 0.')
                 elif kind in ('sql', '') and body:
                     emit({'stage': 'sql', 'sql': body})
                     last_sql = body
                     try:
-                        feedback = 'Result:\n' + run_query(connection, body, allowed)
+                        feedback = 'Result:\n' + run_query(connection, body, allowed, cells)
                         succeeded = True
                     except QueryRejected as error:
                         feedback = f'Query rejected: {error}'

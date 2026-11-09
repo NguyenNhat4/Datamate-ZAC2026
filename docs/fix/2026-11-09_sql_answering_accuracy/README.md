@@ -199,6 +199,23 @@ Between the first and the final measurement on the 39 questions, no previously c
 
 **Why.** The rulebook assigns an order to a period by the day it was placed. One sample business records only a timestamp. Its relations then had no `order_date`, so the query patterns did not apply, the data range was unknown (which made the check in 2.7 impossible there), and the model compared the timestamp with whole dates, which drops every sale after midnight on the last day of a range.
 
+### 3.11 Period functions for the question types that failed most
+
+**Decision.** Four table functions take an inclusive date range and return the finished figures, so each of these question types is one call:
+
+- `semantic.group_revenue_share(first_day, last_day)`: each product group's revenue and `share_percent` of the whole shop's revenue. The denominator includes lines without a group and service-fee lines, as the rulebook says.
+- `semantic.period_comparison(first_day, last_day, base_first_day, base_last_day)`: revenue and order count of the asked period against a base period, the difference (asked − base) and the percent change. An empty period gives NULL, not 0.
+- `semantic.shift_summary(first_day, last_day)`: revenue and order count of the morning and afternoon shifts, with each shift's percent difference from the morning shift, which the rulebook names as the base.
+- `semantic.top_products(first_day, last_day)`: products ranked by base quantity, ties by code (by name without codes). When the rulebook says service-fee lines are not products, they are left out.
+
+Percentages are computed in SQL and rounded half-up to two decimals. Each function is published only when the sales relations carry the columns it needs. In the answering path, these functions' query patterns replace the multi-step patterns for the same question types. A new `name_is(column, 'text')` macro matches a group name exactly, ignoring accents, case and spacing, because the rulebook keeps similarly named groups apart (`trà` is not `trà sữa`). `date_phrases` now resolves "cùng kỳ năm trước / năm ngoái" beside a named month or quarter as the same months a year earlier, and it reads the Telex typo `thangs` as `tháng`.
+
+**Why.** These question types were the most common failures in section 6. Each needed two or three aggregates plus arithmetic, and the model got one of the steps wrong. For example, it filtered on a column that does not exist, ignored the shift filter, returned a table for a top-k list, or used the wrong base. In the training questions, the four types make up about 15% of all questions (by keyword count: 261 change, 88 top, 77 shift and 21 group share, of 3,000; the change count includes some that use another base, such as price-change effects).
+
+**Rejected.** Fixed views precomputed per month: questions use arbitrary ranges (last week, month to date, Tết). Group matching with `name_like` (substring): it would also match `trà sữa` for `trà`.
+
+**Evidence (development check, not a model run).** On copies of the `prepared-fix5` bundles, a script resolved each question's period with `date_phrases`, called the matching function, and compared the result with the training reference. All of these questions from the 8 prepared businesses matched: 39 of 39 change, 16 of 16 shift, 19 of 19 top products and 13 of 13 product-group share. The checker's own keyword rules picked out these questions. It also picked out five more "tỉ trọng" questions that ask about a channel's or a customer group's share, which is a different type and not covered. Before the date-phrase change, the three "same period last year" questions did not match. This shows that the functions compute the right figures. It does not show that the model will call them correctly.
+
 ## 4. How this was checked
 
 - Scripted tests: `make test` (invented data only). New tests cover the status mapping, relation names, header evidence, group inheritance, serial-date corroboration, the sales, debt and stock relations, the query guard, the answer format rules, date phrases, and the answering loop with a scripted model (`tests/preparation/test_business_views.py`, `tests/preparation/test_sql_agent.py`). The preparation suite has one failure that predates this work (`test_compatible_partition_scales_and_missing_optional_field`).
@@ -216,6 +233,6 @@ Between the first and the final measurement on the 39 questions, no previously c
 
 12 wrong and 8 abstained. Of the abstentions, 6 were the model's own choice after failed queries and 2 hit the step limit.
 
-- Most failures are question types with no rulebook-ready relation yet: share of revenue by product group, change against the previous period, morning and afternoon shift, top products, customers by number of orders, price-change effect.
+- Most failures are question types with no rulebook-ready relation yet: share of revenue by product group, change against the previous period, morning and afternoon shift, top products, customers by number of orders, price-change effect. Section 3.11 adds functions for the first four; they have not been measured with the model yet.
 - A few are format slips, such as a correct percentage returned with type `number`.
 - The model is sensitive to prompt wording (section 2.10). Any prompt change needs both question sets re-measured.

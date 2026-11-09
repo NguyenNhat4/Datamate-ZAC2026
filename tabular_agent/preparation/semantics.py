@@ -53,9 +53,10 @@ def _scoped_descriptions(readme: str, source_name: str) -> dict[str, tuple[str, 
         if re.match(r"^#{1,6}\s", line):
             heading = re.sub(r"^#{1,6}\s*", "", line)
             references = re.findall(r"`([^`]+)`", heading)
-            active = bool(re.search(r"cot|columns?|fields?", _words(heading))) and any(
-                names & _source_tokens(ref) for ref in references
-            )
+            # "file, sheet X" names one sheet: both must match, or another sheet's fields would leak in.
+            matches = [bool(names & _source_tokens(ref)) for ref in references]
+            scoped = all(matches) if " sheet " in f" {_words(heading)} " and len(references) > 1 else any(matches)
+            active = bool(re.search(r"cot|columns?|fields?", _words(heading))) and bool(matches) and scoped
         if active:
             match = re.match(r"\s*[-*]\s+\*\*(.+?)\*\*\s*:\s*(.+)", line)
             if match:
@@ -190,7 +191,7 @@ _ALIASES: dict[str, tuple[str, ...]] = {
     "payment_method": ("payment_method", "hình thức thanh toán", "phương thức thanh toán", "phương thức TT", "HTTT", "PTTT", "trả bằng"),
     "channel": ("channel", "kênh bán", "kênh bán hàng", "bán qua", "loại bán"),
     "remaining_amount": ("remaining_amount", "ConNo", "còn nợ"),
-    "product_group": ("product_group", "NhomHang", "nhóm hàng", "danh mục", "loại sản phẩm"),
+    "product_group": ("product_group", "NhomHang", "nhóm hàng", "nhóm hàng hóa", "nhóm hàng(3 cấp)", "danh mục", "loại sản phẩm"),
     "employee": ("employee", "NhanVien", "nhân viên", "nhân viên bán", "NV bán"),
 }
 _LABEL_ROLE = {_token(alias): role for role, aliases in _ALIASES.items() for alias in aliases}

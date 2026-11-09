@@ -10,7 +10,8 @@ from tabular_agent.preparation.contracts import BusinessProfile
 from tabular_agent.preparation.pipeline import (
     _documented_header, _inherit_group_values, _relation_base, _schema, _sequence_epoch)
 from tabular_agent.preparation.semantics import canonical_status, map_status_labels
-from tabular_agent.sql_agent import QueryRejected, check_query, date_block, date_phrases, normalize_answer
+from tabular_agent.sql_agent import (
+    QueryRejected, asks_percent, check_query, date_block, date_phrases, grounded, normalize_answer)
 
 
 RULES = """
@@ -178,6 +179,102 @@ class BusinessViews(unittest.TestCase):
                                   "WHERE order_date BETWEEN DATE '2025-01-01' AND DATE '2025-01-31'").fetchone()[0]
         self.assertEqual(january, Decimal(60))
 
+    def test_orders_and_lines_carry_shift_customer_and_catalogue_facts(self):
+        rules = RULES + "| Ca sáng, ca chiều | theo giờ tạo đơn: ca sáng 06:00–13:59, ca chiều 14:00–21:59 |"
+        self.table("orders", "order", {"order_id": "VARCHAR", "created_at": "TIMESTAMP", "status": "VARCHAR",
+                                       "customer_id": "VARCHAR"},
+                   [("1", "2025-01-01 13:59:00", "completed", "C1"), ("2", "2025-01-01 14:00:00", "completed", None),
+                    ("3", "2025-01-01 23:00:00", "completed", "C1")], ["order_id"])
+        self.table("items", "order_item", {"order_id": "VARCHAR", "line_number": "VARCHAR", "product_id": "VARCHAR",
+                                           "product_name": "VARCHAR", "quantity": "DECIMAL(20,0)", "line_amount": "DECIMAL(20,0)"},
+                   [("1", "1", "P1", "Tra vai", 1, 10), ("2", "1", "P1", "Trà vải", 1, 20), ("3", "1", "P2", "Bánh", 1, 40)],
+                   ["order_id", "line_number"])
+        self.table("products", "product", {"product_id": "VARCHAR", "product_name": "VARCHAR", "product_group": "VARCHAR",
+                                           "base_unit": "VARCHAR"},
+                   [("P1", "Trà vải", "Đồ uống", "ly"), ("P2", "Bánh", "Bánh", "cái")], ["product_id"])
+        self.table("customers", "customer", {"customer_id": "VARCHAR", "customer_name": "VARCHAR"}, [("C1", "Chị Lan")], ["customer_id"])
+        _schema(self.db, self.profile, self.relations, "", rules)
+        self.assertEqual(self.db.execute("SELECT order_id, shift, customer_key, customer_name FROM semantic.orders ORDER BY 1").fetchall(),
+                         [("1", "morning", "C1", "Chị Lan"), ("2", "afternoon", None, None), ("3", None, "C1", "Chị Lan")])
+        rows = self.db.execute("SELECT product_name, product_group, base_unit, SUM(line_amount) FROM semantic.eligible_sales_lines "
+                               "GROUP BY ALL ORDER BY 1").fetchall()
+        self.assertEqual(rows, [("Bánh", "Bánh", "cái", Decimal(40)), ("Trà vải", "Đồ uống", "ly", Decimal(30))])
+        self.assertEqual(self.db.execute("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE shift = 'afternoon'").fetchone()[0], Decimal(20))
+
+    def test_name_spellings_merge_and_walk_in_is_not_a_customer(self):
+        self.table("items", "order_item", {"order_id": "VARCHAR", "order_date": "DATE", "status": "VARCHAR",
+                                           "customer_name": "VARCHAR", "product_name": "VARCHAR", "line_amount": "DECIMAL(20,0)"},
+                   [("1", "2025-01-01", "completed", "Chị Lan", "Trà vải", 10), ("2", "2025-01-01", "completed", "chi lan", "Trà vải", 10),
+                    ("3", "2025-01-01", "completed", "Khách lẻ", "Tra vai", 10), ("4", "2025-01-01", "completed", "Chị Lan 2", "Trà đào", 10),
+                    ("5", "2025-01-01", "completed", "KL", "Tra dao", 10)])
+        _schema(self.db, self.profile, self.relations, "", RULES)
+        keys = self.db.execute("SELECT customer_key, COUNT(*) FROM semantic.orders GROUP BY 1 ORDER BY 1 NULLS FIRST").fetchall()
+        self.assertEqual(keys, [(None, 2), ("chi lan", 2), ("chi lan 2", 1)])
+        names = self.db.execute("SELECT product_name, COUNT(*) FROM semantic.eligible_sales_lines GROUP BY 1 ORDER BY 1").fetchall()
+        self.assertEqual(names, [("Trà vải", 3), ("Trà đào", 2)])
+
+    def period_shop(self):
+        rules = (RULES + "| Ca sáng, ca chiều | theo giờ tạo đơn: ca sáng 06:00–13:59, ca chiều 14:00–21:59 |\n"
+                 "| Mặt hàng | Dòng Phí phục vụ không phải mặt hàng: không xếp hạng, không đếm |")
+        self.table("orders", "order", {"order_id": "VARCHAR", "created_at": "TIMESTAMP", "status": "VARCHAR"},
+                   [("1", "2025-01-10 09:00:00", "completed"), ("2", "2025-02-03 08:00:00", "completed"),
+                    ("3", "2025-02-03 15:00:00", "completed"), ("4", "2025-02-04 15:30:00", "cancelled"),
+                    ("5", "2025-02-05 16:00:00", "completed")], ["order_id"])
+        self.table("items", "order_item", {"order_id": "VARCHAR", "line_number": "VARCHAR", "product_id": "VARCHAR",
+                                           "product_name": "VARCHAR", "base_quantity": "DECIMAL(20,0)",
+                                           "line_amount": "DECIMAL(20,0)"},
+                   [("1", "1", "P1", "Trà", 2, 20), ("2", "1", "P1", "Trà", 3, 30), ("2", "2", "P3", "Phí phục vụ", 5, 5),
+                    ("3", "1", "P2", "Trà sữa", 3, 60), ("4", "1", "P2", "Trà sữa", 10, 100), ("5", "1", "P4", "Bánh", 1, 5)],
+                   ["order_id", "line_number"])
+        self.table("products", "product", {"product_id": "VARCHAR", "product_name": "VARCHAR", "product_group": "VARCHAR"},
+                   [("P1", "Trà", "Trà"), ("P2", "Trà sữa", "Trà sữa"), ("P3", "Phí phục vụ", None), ("P4", "Bánh", "Bánh")],
+                   ["product_id"])
+        return _schema(self.db, self.profile, self.relations, "", rules)
+
+    def test_period_functions_answer_in_one_call(self):
+        schema = self.period_shop()
+        self.assertTrue({"semantic.group_revenue_share", "semantic.period_comparison", "semantic.shift_summary",
+                         "semantic.top_products"} <= self.names(schema))
+        feb = "DATE '2025-02-01', DATE '2025-02-28'"
+        # The share's denominator is the whole shop, including the ungrouped service-fee line; similar names stay apart.
+        self.assertEqual(self.db.execute(f"SELECT product_group, revenue, shop_revenue, share_percent "
+                                         f"FROM semantic.group_revenue_share({feb}) ORDER BY 1 NULLS FIRST").fetchall(),
+                         [(None, Decimal(5), Decimal(100), Decimal("5.00")), ("Bánh", Decimal(5), Decimal(100), Decimal("5.00")),
+                          ("Trà", Decimal(30), Decimal(100), Decimal("30.00")), ("Trà sữa", Decimal(60), Decimal(100), Decimal("60.00"))])
+        row = self.db.execute(f"SELECT * FROM semantic.period_comparison({feb}, DATE '2025-01-01', DATE '2025-01-31')").fetchone()
+        self.assertEqual(row, (Decimal(100), Decimal(20), Decimal(80), Decimal("400.00"), 3, 1, 2, Decimal("200.00")))
+        # The base period is the asked period's comparison: a fall is negative.
+        self.assertEqual(self.db.execute(f"SELECT revenue_change_percent, orders_difference FROM semantic.period_comparison("
+                                         f"DATE '2025-01-01', DATE '2025-01-31', {feb})").fetchone(), (Decimal("-80.00"), -2))
+        # A period without data is NULL, not 0.
+        self.assertEqual(self.db.execute(f"SELECT revenue, orders, revenue_change_percent FROM semantic.period_comparison("
+                                         f"DATE '2024-01-01', DATE '2024-01-31', {feb})").fetchone(), (None, None, None))
+        # The morning shift is the base; the cancelled afternoon order counts in neither shift.
+        self.assertEqual(self.db.execute(f"SELECT * FROM semantic.shift_summary({feb})").fetchall(),
+                         [("morning", Decimal(35), 1, Decimal("0.00"), Decimal("0.00")),
+                          ("afternoon", Decimal(65), 2, Decimal("85.71"), Decimal("100.00"))])
+        # Ranked by base quantity, ties by code; the service-fee line is not a product.
+        self.assertEqual(self.db.execute(f"SELECT rank, product_id, product_name, base_quantity "
+                                         f"FROM semantic.top_products({feb})").fetchall(),
+                         [(1, "P1", "Trà", Decimal(3)), (2, "P2", "Trà sữa", Decimal(3)), (3, "P4", "Bánh", Decimal(1))])
+
+    def test_period_functions_need_their_columns(self):
+        self.table("items", "order_item", {"order_id": "VARCHAR", "order_date": "DATE", "status": "VARCHAR",
+                                           "product_name": "VARCHAR", "line_amount": "DECIMAL(20,0)"},
+                   [("1", "2025-01-01", "completed", "A", 10)])
+        names = self.names(_schema(self.db, self.profile, self.relations, "", RULES))
+        self.assertIn("semantic.period_comparison", names)
+        for name in ("semantic.group_revenue_share", "semantic.shift_summary", "semantic.top_products"):
+            self.assertNotIn(name, names)
+
+    def test_stock_without_unit_conversions_still_reports_base_units(self):
+        self.table("stock", "inventory_snapshot", {"product_id": "VARCHAR", "product_name": "VARCHAR", "base_unit": "VARCHAR",
+                                                   "inventory_quantity": "DECIMAL(20,0)"}, [("S1", "Bottle", "chai", 38)])
+        readme = "- Dữ liệu có đến hết 12/06/2026.\n- **Tồn kho**: **Tồn cuối kỳ** là tồn cuối ngày cuối có dữ liệu, theo đơn vị cơ bản."
+        _schema(self.db, self.profile, self.relations, readme, RULES)
+        self.assertEqual(self.db.execute("SELECT stock_base_units, base_unit, stock_date FROM semantic.stock_snapshot").fetchall(),
+                         [(Decimal(38), "chai", date(2026, 6, 12))])
+
     def test_debt_follows_the_rulebook_definition(self):
         self.credit_shop()
         schema = _schema(self.db, self.profile, self.relations, "", RULES)
@@ -255,7 +352,8 @@ class QueryGuard(unittest.TestCase):
     def test_everything_else_is_rejected(self):
         for sql in ("SELECT * FROM private.lineage", "SELECT * FROM read_csv('/etc/passwd')",
                     "SELECT * FROM duckdb_tables()", "SELECT * FROM information_schema.tables",
-                    "DROP TABLE clean.sales", "SELECT 1; SELECT 2", "SELECT * FROM other", ""):
+                    "DROP TABLE clean.sales", "SELECT 1; SELECT 2", "SELECT * FROM other", "",
+                    "SELECT * FROM clean.sales WHERE d = CURRENT_DATE", "SELECT * FROM clean.sales WHERE n LIKE '%a%'"):
             with self.assertRaises(QueryRejected, msg=sql):
                 check_query(self.db, sql, self.allowed)
 
@@ -274,7 +372,34 @@ class AnswerFormat(unittest.TestCase):
         lines = date_phrases("Doanh thu tuần rồi so với 7 ngày gần nhất?", "2025-07-25")
         self.assertIn('- "tuan roi" means last week: 2025-07-14 to 2025-07-20', lines)
         self.assertIn('- "7 ngay gan nhat" means the last 7 days: 2025-07-19 to 2025-07-25', lines)
-        self.assertEqual(date_phrases("Doanh thu tháng 3/2025?", "2025-07-25"), [])
+        self.assertEqual(date_phrases("Doanh thu là bao nhiêu?", "2025-07-25"), [])
+
+    def test_named_months_and_quarters_get_explicit_ranges(self):
+        self.assertEqual(date_phrases("Doanh thu tháng 2/2024?", "2025-07-25"),
+                         ['- "thang 2 2024" means 2024-02-01 to 2024-02-29; the month before it is 2024-01-01 to 2024-01-31'])
+        self.assertEqual(date_phrases("bao nhieu don trong quy 3 nam 2025", "2026-09-14"),
+                         ['- "quy 3 nam 2025" means 2025-07-01 to 2025-09-30; the quarter before it is 2025-04-01 to 2025-06-30'])
+        # Without a year: this year's unless it starts after the reference date.
+        self.assertIn("2025-02-01 to 2025-02-28", date_phrases("doanh thu tháng 2", "2026-01-15")[0])
+        self.assertIn("2026-01-01 to 2026-01-31", date_phrases("doanh thu tháng 1", "2026-01-15")[0])
+        # Beside a named month, "the month before" belongs to that month, not to today.
+        self.assertEqual(date_phrases("So cùng kỳ năm trước, doanh thu tháng 5/2026 tăng mấy %?", "2026-06-02"),
+                         ['- "thang 5 2026" means 2026-05-01 to 2026-05-31; '
+                          'the same month a year earlier is 2025-05-01 to 2025-05-31'])
+        self.assertIn("2025-11-01 to 2025-11-30", date_phrases("dthu thangs 11/2025 hơn hay kém tháng trc", "2026-06-02")[0])
+        lines = date_phrases("so với tháng trước, doanh thu tháng 12/2025 tăng mấy %", "2026-06-02")
+        self.assertEqual(len(lines), 1)
+        self.assertIn("the month before it is 2025-11-01 to 2025-11-30", lines[0])
+
+    def test_percent_questions_and_grounded_numbers(self):
+        self.assertTrue(asks_percent("Tỉ lệ đơn huỷ tháng 1 là bao nhiêu?"))
+        self.assertTrue(asks_percent("doanh thu tang hay giam may % so voi thang truoc"))
+        self.assertFalse(asks_percent("tồn kho thuốc 10% chai 90ml còn bao nhiêu chai"))
+        self.assertTrue(grounded(0.79, [0.79]))
+        self.assertTrue(grounded(70712, [Decimal("70711.6")]))
+        self.assertTrue(grounded(2.89, [2.8912]))
+        self.assertFalse(grounded(79, [0.79]))
+        self.assertFalse(grounded(0, []))
 
     def test_several_numbers_are_a_list_and_a_table_needs_a_named_object(self):
         misplaced = {"type": "table", "columns": ["whole", "loose"], "rows": [[13, 2]]}
