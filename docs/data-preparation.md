@@ -52,6 +52,39 @@ Keys and many-to-one relationships are tested against full data. Ordinary sales 
 
 Observed event ranges are distinct from declared source coverage. Inventory snapshots retain their effective date; they do not establish arbitrary historical inventory. Preparation keeps the complete timeline and has no dependence on the system date or a particular question date.
 
+## Rulebook-ready relations
+
+`semantic.*` relations apply the current rulebook so a query does not restate it. Each is published only when its inputs pass their checks; otherwise it is absent and the capability stays unavailable.
+
+| Relation | Meaning |
+|---|---|
+| `semantic.orders` | Every order, one row each, with `order_state` (`completed`, `shipping`, `cancelled`, `returned`), `counts_as_sale` and order `revenue` |
+| `semantic.eligible_orders` | Orders that count for revenue and order counts |
+| `semantic.eligible_sales_lines` | Sales lines of those orders, each carrying `order_date`; for a book with no order IDs, the rows that are neither cancelled nor returned |
+| `semantic.product_quantities` | Those lines with `base_quantity` and the product's `base_unit` |
+| `semantic.debt_as_of(DATE)` | Table function: orders still owing at the end of a date |
+| `semantic.debt_repayments`, `semantic.debt_added` | Repayments after the purchase day, and new debt, of credit orders |
+| `semantic.stock_snapshot` | End-of-data stock split into whole large units and loose base units; valid only for `stock_date` |
+
+Supporting rules, all derived from the rulebook or README and never from a business or question identifier:
+
+- **Order state.** Status labels map to the rulebook's four states by an exact, accent-folded vocabulary. When exactly one label is unfamiliar and exactly one state has no label, that label is that state. Any other unfamiliar label blocks the sales relations.
+- **Grouped rows.** When the rulebook's blank-cell rule is present, order-level cells that are blank on every continuation row inherit the first row of their group. Rows before the first order ID stay blank.
+- **Header evidence.** A weak first-row header is accepted when the README data dictionary documents its labels, or when its cells are text over columns that parse as numbers or dates. Otherwise the table stays blocked.
+- **Serial dates.** Serial dates in CSV or SQLite need agreement with another dated field, or with their written-out neighbours in a column whose written dates never decrease. Exactly one epoch must fit every value.
+- **Names.** A workbook holding differently named sheets publishes one relation per sheet; period suffixes on files and sheets (`_1`, `_T1_2025`, `01.2025`) are dropped so parts of one table are assembled.
+
+## Answering from a bundle
+
+`bench` and `predict` accept `--prepared <directory>` to answer with SQL over prepared bundles instead of reading raw files:
+
+```bash
+make prepare OUT=artifacts/prepared
+make bench-local LIMIT=10 ARGS="--prepared artifacts/prepared --max-steps 6"
+```
+
+The model receives the rulebook, the business README, the schema (semantic relations first, with query patterns for the relations the bundle has), explicit date ranges derived from `as_of_date`, the observed sales date range and the question. It writes one `SELECT` at a time and sees bounded results. Queries run read-only with external access disabled and are checked against the published relations and table functions; private audit tables, other table functions and non-`SELECT` statements are rejected. Label columns with at most 12 distinct values show those values; names, identifiers and free text never do. A business with no bundle is answered with an abstention. Numeric text in a final answer is converted to JSON numbers.
+
 ## Bundle contents and statuses
 
 Each content-addressed bundle contains:

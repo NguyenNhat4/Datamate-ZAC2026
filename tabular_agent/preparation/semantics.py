@@ -13,7 +13,7 @@ import unicodedata
 from functools import lru_cache
 from decimal import Decimal, InvalidOperation
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Iterable
 
 
 def _words(value: str) -> str:
@@ -187,6 +187,11 @@ _ALIASES: dict[str, tuple[str, ...]] = {
     "old_price": ("old_price", "giá cũ"),
     "conversion_factor": ("conversion_factor", "HeSoQuyDoi", "hệ số", "hệ số QĐ", "tỉ lệ quy đổi", "tỷ lệ quy đổi"),
     "base_unit": ("base_unit", "DonViCoSo", "đơn vị cơ bản", "đơn vị gốc", "ĐV gốc", "ĐV nhỏ"),
+    "payment_method": ("payment_method", "hình thức thanh toán", "phương thức thanh toán", "phương thức TT", "HTTT", "PTTT", "trả bằng"),
+    "channel": ("channel", "kênh bán", "kênh bán hàng", "bán qua", "loại bán"),
+    "remaining_amount": ("remaining_amount", "ConNo", "còn nợ"),
+    "product_group": ("product_group", "NhomHang", "nhóm hàng", "danh mục", "loại sản phẩm"),
+    "employee": ("employee", "NhanVien", "nhân viên", "nhân viên bán", "NV bán"),
 }
 _LABEL_ROLE = {_token(alias): role for role, aliases in _ALIASES.items() for alias in aliases}
 
@@ -214,6 +219,11 @@ def _role_from_description(description: str, context: str) -> str | None:
         ("order_goods_amount", ("tong tien hang cua don", "tien hang cua don")),
         ("order_total", ("tong tien don", "so khach phai tra cho ca don", "order total")),
         ("paid_amount", ("da thanh toan", "amount already paid")),
+        ("payment_method", ("hinh thuc thanh toan", "phuong thuc thanh toan", "payment method")),
+        ("channel", ("kenh ban", "sales channel")),
+        ("remaining_amount", ("con no", "remaining debt")),
+        ("product_group", ("nhom hang", "product group")),
+        ("employee", ("nhan vien", "employee")),
         ("payment_date", ("thoi diem thu", "payment time")),
         ("payment_amount", ("so tien tra lan do", "payment amount")),
         ("receipt_amount", ("tong tien phieu nhap", "tong tien cua ca phieu nhap")),
@@ -332,20 +342,60 @@ def return_evidence_policy(readme: str) -> dict[str, Any]:
     }
 
 
-def classify_status(value: Any) -> str:
-    """Known status vocabulary only. Missing or unfamiliar never means active."""
+_STATUS_LABELS = {
+    "completed": {"hoan thanh", "da hoan thanh", "hoan tat", "da hoan tat", "xong", "da xong", "thanh cong",
+                  "giao thanh cong", "da giao", "da giao hang", "da nhan", "da nhan hang", "da lay", "da lay hang",
+                  "ok", "completed", "complete", "done", "delivered", "success"},
+    "shipping": {"dang giao", "dang giao hang", "dang giao dich", "dang van chuyen", "dang xu ly", "dang gui",
+                 "dang ship", "cho giao", "cho giao hang", "cho xu ly", "cho lay hang", "shipping", "in delivery",
+                 "processing", "in progress"},
+    "cancelled": {"huy", "da huy", "bi huy", "huy don", "don huy", "da huy don", "khach huy", "huy bo", "da huy bo",
+                  "cancelled", "canceled", "cancel"},
+    "returned": {"tra hang", "da tra hang", "hoan tra", "da hoan tra", "doi tra", "tra lai", "da tra lai",
+                 "hoan hang", "da hoan hang", "hang tra ve", "khach tra hang", "returned", "return", "refunded"},
+}
+CANONICAL_STATUSES = ("completed", "shipping", "cancelled", "returned")
+
+
+def canonical_status(value: Any) -> str:
+    """Map one status label to a rulebook state by exact, accent-folded vocabulary.
+
+    Returns completed, shipping, cancelled, returned or unknown. Qualified or
+    negated labels ("hoàn thành một phần", "không huỷ") never match.
+    """
     if not isinstance(value, str) or not value.strip():
         return "unknown"
     text = _words(value)
-    states = {
-        "cancelled": {"huy", "da huy", "bi huy", "huy don", "don huy", "cancelled", "canceled", "cancel"},
-        "returned": {"tra hang", "da tra hang", "hoan tra", "doi tra", "returned", "return"},
-        "active": {"hoan thanh", "da hoan thanh", "da giao", "dang giao", "dang giao hang", "completed", "complete", "shipping", "in delivery"},
-    }
-    for status, values in states.items():
+    for status, values in _STATUS_LABELS.items():
         if text in values:
             return status
     return "unknown"
+
+
+def map_status_labels(values: Iterable[Any]) -> tuple[dict[str, str], str | None]:
+    """Map every distinct status label of one source to a canonical state.
+
+    The rulebook gives each order exactly one of four states. When exactly one
+    nonblank label is unfamiliar and exactly one state has no label, the
+    unfamiliar label is that state. Returns the mapping and the label inferred
+    this way, if any; other unfamiliar labels stay unknown.
+    """
+    labels = [value for value in values if isinstance(value, str) and value.strip()]
+    mapping = {label: canonical_status(label) for label in labels}
+    unknown = [label for label, state in mapping.items() if state == "unknown"]
+    missing = [state for state in CANONICAL_STATUSES if state not in mapping.values()]
+    folded = {_words(label) for label in unknown}
+    if len(folded) == 1 and len(missing) == 1:
+        for label in unknown:
+            mapping[label] = missing[0]
+        return mapping, unknown[0]
+    return mapping, None
+
+
+def classify_status(value: Any) -> str:
+    """Known status vocabulary only. Missing or unfamiliar never means active."""
+    state = canonical_status(value)
+    return "active" if state in ("completed", "shipping") else state
 
 
 def propose_table(

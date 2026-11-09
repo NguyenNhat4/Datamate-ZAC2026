@@ -132,12 +132,145 @@ def _corroborated_epoch(connection, raw, labels, names, date_index):
         if compared and not failed:
             return '1900', {'kind': 'cross_field_date_agreement', 'column': names[other],
                             'serial_values_checked': compared, 'mismatches': 0}
-    return None, None
+    return _sequence_epoch(connection, raw, names[date_index])
+
+
+def _sequence_epoch(connection, raw, name):
+    """Corroborate serial dates by their written-out neighbours in a chronologically ordered column.
+
+    When the explicitly written dates of the column never decrease down the
+    file, each serial value must fall between its nearest written neighbours.
+    Exactly one epoch may satisfy every serial value; otherwise none is chosen.
+    """
+    from openpyxl.utils.datetime import from_excel
+    from .parsers import parse_value
+    explicit = {'kind': 'date', 'day_first': True, 'epoch': None, 'year': None, 'status': 'validated', 'version': '1'}
+    rows = connection.execute(f'SELECT {_q(name)} FROM {raw} ORDER BY _row').fetchall()
+    known, serials = [], []
+    for position, (value,) in enumerate(rows):
+        text = (value or '').strip()
+        if not text:
+            continue
+        if re.fullmatch(r'\d{5}(?:\.0+)?', text):
+            serials.append((position, float(text)))
+            continue
+        try:
+            parsed = parse_value(text, explicit)
+        except (ValueError, TypeError, OverflowError):
+            return None, None
+        parsed = parsed.date() if isinstance(parsed, datetime) else parsed
+        if parsed is None or (known and parsed < known[-1][1]):
+            return None, None
+        known.append((position, parsed))
+    if len(serials) < 20 or len(known) < 20:
+        return None, None
+    import bisect
+    positions = [position for position, _ in known]
+    passing = []
+    for epoch, shift in (('1900', 0), ('1904', 1462)):
+        ok = True
+        for position, serial in serials:
+            try:
+                proposed = from_excel(serial + shift).date()
+            except (ValueError, OverflowError):
+                ok = False
+                break
+            index = bisect.bisect_left(positions, position)
+            before = known[index - 1][1] if index else None
+            after = known[index][1] if index < len(known) else None
+            if (before and proposed < before) or (after and proposed > after):
+                ok = False
+                break
+        if ok:
+            passing.append(epoch)
+    if len(passing) != 1:
+        return None, None
+    return passing[0], {'kind': 'ordered_neighbour_date_agreement', 'serial_values_checked': len(serials),
+                        'written_dates': len(known), 'mismatches': 0}
+
+
+_PARTITION_TOKEN = re.compile(
+    r'(?:(?:\A|[\s_.\-/]+)(?:tháng|thang|quý|quy|năm|nam|month|year|th|t|m|q)?[\s_.\-/]*\d{1,4})+\Z', re.I)
+_DEFAULT_SHEETS = {'', 'sheet', 'trang tinh', 'data', 'du lieu', 'worksheet'}
+
+
+def _default_sheet(label):
+    from .parsers import text_key
+    return re.fullmatch(r'(?:sheet|trang tinh|data|du lieu|worksheet)?\s*\d*', text_key(str(label or ''))) is not None
+
+
+def _partition_base(label):
+    """Drop trailing period tokens (_T1, _Thang01_2025, 01.2025, _1) that only split one table into parts."""
+    return _PARTITION_TOKEN.sub('', str(label or '').strip()).strip(' _.-/')
+
+
+def _relation_base(table_name, sheet, path, inventory, physical=None):
+    """Name a relation after its file, or after its sheet when one workbook holds different lists.
+
+    Monthly or yearly sheets and files keep one shared name so compatible
+    partitions are assembled; sheets with different names are different lists.
+    """
+    if table_name:
+        return table_name
+    from .parsers import text_key
+    stem = Path(path).stem
+    file_base = _partition_base(stem) or stem
+    sheet_base = _partition_base(sheet)
+    if _default_sheet(sheet_base):
+        return file_base
+    siblings = {text_key(_partition_base(item.get('sheet'))) for item in inventory
+                if item.get('path') == (physical or path) and not _default_sheet(_partition_base(item.get('sheet')))}
+    return sheet_base if len(siblings) > 1 else file_base
+
+
+def _documented_header(labels, readme):
+    """True when the README data dictionary documents this header row's labels."""
+    from .parsers import text_key
+    documented = {text_key(item) for item in re.findall(r'\*\*(.+?)\*\*', readme or '')}
+    hits = sum(text_key(label) in documented for label in labels)
+    return hits >= 2 and hits * 2 >= len(labels)
+
+
+def _inherit_group_values(connection, raw, names, order_column):
+    """Fill blank order-level cells on continuation rows from the first row of their group.
+
+    Applies only to columns that are blank on every row lacking an order ID, so
+    line-level cells are never overwritten. Rows before the first order ID stay
+    blank. Returns the number of rows that inherited an order ID.
+    """
+    blank = lambda name: f"({_q(name)} IS NULL OR trim({_q(name)})='')"
+    total, missing = connection.execute(
+        f'SELECT count(*), count(*) FILTER(WHERE {blank(order_column)}) FROM {raw}').fetchone()
+    if not missing or missing == total:
+        return 0
+    grouped = [name for name in names if connection.execute(
+        f'SELECT count(*) FROM {raw} WHERE {blank(order_column)} AND NOT {blank(name)}').fetchone()[0] == 0]
+    if len(grouped) == len(names):
+        return 0
+    fields = []
+    for name in names:
+        fields.append(f'CASE WHEN _blank THEN first_value({_q(name)}) OVER w ELSE {_q(name)} END AS {_q(name)}'
+                      if name in grouped else _q(name))
+    head = f'first_value({_q(order_column)}) OVER w'
+    staging = raw[:-1] + '_inherit"'
+    connection.execute(
+        f'CREATE TABLE {staging} AS SELECT _record_id,_source_id,_row,'
+        f"CASE WHEN _blank AND {head} IS NOT NULL THEN sha256(_raw_fingerprint || '|' || {head}) "
+        f'ELSE _raw_fingerprint END AS _raw_fingerprint,' + ','.join(fields) +
+        f' FROM (SELECT *, {blank(order_column)} AS _blank, count(*) FILTER(WHERE NOT {blank(order_column)}) '
+        f'OVER (ORDER BY _row) AS _group FROM {raw}) WINDOW w AS (PARTITION BY _group ORDER BY _row) ORDER BY _row')
+    filled = connection.execute(
+        f'SELECT count(*) FROM {staging} s JOIN {raw} r USING (_record_id) '
+        f"WHERE (r.{_q(order_column)} IS NULL OR trim(r.{_q(order_column)})='') "
+        f"AND s.{_q(order_column)} IS NOT NULL AND trim(s.{_q(order_column)})<>''").fetchone()[0]
+    connection.execute(f'DROP TABLE {raw}')
+    connection.execute(f'ALTER TABLE {staging} RENAME TO {raw.split(".", 1)[1]}')
+    return filled
 
 
 def _scan_table(connection, table, readme, rulebook, config, spec, profile, deadline):
     from .parsers import infer_parser, parse_value, representation, text_key
-    from .semantics import propose_table, column_description
+    from .semantics import propose_table, column_description, _words
     source = asdict(table.source)
     names = _names(table.labels)
     raw_name = 'r_' + hashlib.sha256((table.source.source_id + table.region_id).encode()).hexdigest()[:20]
@@ -191,8 +324,8 @@ def _scan_table(connection, table, readme, rulebook, config, spec, profile, dead
         if key in overrides:
             proposal[key] = overrides[key]
     roles = {role: names[i] for role, i in sorted(proposal.get('roles', {}).items(),key=lambda item:(item[1],item[0])) if isinstance(i, int) and 0 <= i < len(names)}
-    base = table.source.table or Path(table.source.display_alias or table.source.path).stem
-    base = re.sub(r'(?:[_ -](?:\d{1,4}))+\Z', '', base)
+    base = _relation_base(table.source.table, table.source.sheet,
+                          table.source.display_alias or table.source.path, profile.inventory, table.source.path)
     result = TableProfile(source_id=table.source.source_id, region_id=table.region_id,
                           source=source, name=_names([base])[0], labels=table.labels,
                           header_rows=table.header_rows, extraction=table.metadata,
@@ -201,6 +334,14 @@ def _scan_table(connection, table, readme, rulebook, config, spec, profile, dead
                           candidate_keys=[roles[k] for k in proposal.get('key_roles', []) if k in roles],
                           duplicate_policy=proposal.get('duplicate_policy', 'preserve'),
                           evidence=proposal.get('evidence', []))
+    if (roles.get('order_id') and result.grain in ('order', 'order_item')
+            and 'o de trong o cac dong sau cua cung mot nhom dong' in _words(rulebook)):
+        inherited = _inherit_group_values(connection, raw, names, roles['order_id'])
+        if inherited:
+            result.extraction = {**(result.extraction or {}), 'inherited_group_rows': inherited}
+            profile.issues.append(Issue(code='GROUP_VALUES_INHERITED', severity='info', source_id=result.source_id,
+                                        relation=result.name, count=inherited,
+                                        message='Blank order-level cells on continuation rows inherit the first row of their group (rulebook recording rule).'))
     if accounting['unresolved']:
         profile.issues.append(Issue(code='UNRESOLVED_ROWS', severity='blocked', source_id=result.source_id,
                                     message='Record-like rows are unresolved; this region cannot be published complete.',
@@ -320,7 +461,18 @@ def _scan_table(connection, table, readme, rulebook, config, spec, profile, dead
         elif col.all_empty:
             profile.issues.append(Issue(code='EMPTY_FIELD', severity='info', source_id=result.source_id,
                                         relation=result.name, column=col.name, message='Source records no values for this field.'))
-    layout_blocked = bool(set(table.metadata.get('layout_issues',[])) & {'weak_header_evidence','unresolved_header'})
+    layout_issues = set(table.metadata.get('layout_issues', []))
+    header_evidence = None
+    if 'weak_header_evidence' in layout_issues and 'unresolved_header' not in layout_issues:
+        textual = all(not re.fullmatch(r'[\d\s.,:/\-]*', str(label)) for label in table.labels)
+        typed = any(c.usable and c.parser.get('kind') in ('decimal', 'quantity', 'date', 'datetime') for c in result.columns)
+        if _documented_header(table.labels, readme):
+            header_evidence = 'readme_data_dictionary'
+        elif textual and typed and len(set(table.labels)) == len(table.labels):
+            header_evidence = 'type_shift_between_header_and_records'
+    if header_evidence:
+        result.extraction = {**(result.extraction or {}), 'header_evidence': header_evidence}
+    layout_blocked = bool(layout_issues & {'weak_header_evidence','unresolved_header'}) and not header_evidence
     if layout_blocked:
         profile.issues.append(Issue(code='LAYOUT_AMBIGUOUS',severity='blocked',source_id=result.source_id,
                                     message='Header evidence is unresolved; provide a validated layout specification.'))
@@ -340,8 +492,8 @@ def _publish_groups(connection, profile):
         if issue.code not in ('SOURCE_SCAN_FAILED','EMPTY_SOURCE'):continue
         source=next((s for s in profile.inventory if s['source_id']==issue.source_id),None)
         if source:
-            label=source.get('table') or Path(source.get('display_alias') or source['path']).stem
-            blocked_families.add(normalize_name(re.sub(r'(?:[_ -](?:\d{1,4}))+\Z','',label)))
+            label=_relation_base(source.get('table'),source.get('sheet'),source.get('display_alias') or source['path'],profile.inventory,source['path'])
+            blocked_families.add(_names([label])[0])
     for table in profile.tables:
         if table.status == 'blocked' or table.name in blocked_families:
             if table.status!='blocked':
@@ -442,7 +594,7 @@ def _relation_sql(relation):
 
 def _relations_and_semantics(connection, profile, relations, readme, rulebook):
     """Publish only semantic operations whose complete dependencies were checked."""
-    from .semantics import classify_status, return_evidence_policy, sales_eligibility_policy, _words
+    from .semantics import map_status_labels, return_evidence_policy, sales_eligibility_policy, _words
     from .parsers import text_key
 
     def issue(code, message, relation=None, count=1):
@@ -497,6 +649,28 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
                 'missing_line_orders': missing, 'validated': bool(n) and wrong == 0})
 
     semantic = []
+    DERIVED_MEANINGS = {
+        'order_state': "Rulebook state of the whole order: 'completed', 'shipping', 'cancelled' or 'returned'.",
+        'counts_as_sale': 'TRUE when the order counts for revenue and order counts (not cancelled, not returned).',
+        'revenue': "Order revenue: sum of its line amounts. Use only where counts_as_sale.",
+        'cancelled': 'TRUE when the order is cancelled.',
+        'returned': 'TRUE when the order has any return (the whole order is excluded from sales).',
+        'order_date': 'Order date; decides which period the sale belongs to.',
+    }
+
+    def status_cases(column, relation_sql, relation_name):
+        """Map this source's status labels to rulebook states; unfamiliar labels stay unknown."""
+        values = [r[0] for r in connection.execute(f'SELECT DISTINCT {_q(column)} FROM {relation_sql}').fetchall()]
+        mapping, inferred = map_status_labels(values)
+        if inferred is not None:
+            profile.issues.append(Issue(code='STATUS_INFERRED_BY_ELIMINATION', severity='info', relation=relation_name,
+                message='One unfamiliar status label was assigned the only rulebook state without a label.'))
+        cases = []
+        for value, state in mapping.items():
+            if state == 'shipping' and policy.get('include_shipping') is not True:
+                state = 'unknown'
+            cases.append(f'WHEN {_q(column)}={_lit(value)} THEN {_lit(state)}')
+        return 'CASE ' + ' '.join(cases) + " ELSE 'missing' END" if cases else "'missing'"
 
     def publish(name, grain, sql, sources, meaning, evidence=None, keys=None):
         connection.execute('CREATE VIEW ' + name + ' AS ' + sql)
@@ -515,6 +689,8 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
             if col == 'base_quantity':
                 field['meaning'] = 'Quantity in the verified product base unit; not a count of orders or rows.'
                 field['unit'] = 'product base unit'
+            if col in DERIVED_MEANINGS:
+                field['meaning'] = DERIVED_MEANINGS[col]
             columns.append(field)
         relation = {'name': name, 'grain': grain, 'meaning': meaning, 'columns': columns,
                     'keys': keys or [], 'roles': {c['name']: c['name'] for c in columns},
@@ -531,6 +707,22 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
         return semantic
     primary = orders[0] if len(orders) == 1 else None
     bases = [primary] if primary else items if not orders else []
+    recordings = [r for r in relations if r['grain'] == 'sale_recording']
+    if not bases and len(recordings) == 1 and {'status', 'line_amount', 'order_date'} <= recordings[0]['roles'].keys():
+        # A book written one sale per row has no orders: each row carries its own state.
+        book = recordings[0]
+        state = status_cases(book['roles']['status'], _relation_sql(book), book['name'])
+        unknown = connection.execute(f"SELECT count(*) FROM {_relation_sql(book)} WHERE {state} IN ('unknown','missing')").fetchone()[0]
+        if unknown:
+            issue('UNKNOWN_ORDER_STATUS', 'Eligible sales are blocked by unresolved status meanings.', book['name'], unknown)
+            return semantic
+        selected = ','.join(f'{_q(column)} AS {_q(role)}' for role, column in book['roles'].items())
+        sales = publish('semantic.eligible_sales_lines', 'sale_recording',
+            f"SELECT {selected} FROM {_relation_sql(book)} WHERE {state} IN ('completed','shipping')", [book],
+            'Recorded sales that count for revenue: rows that are neither cancelled nor returned. '
+            'This book has no order IDs, so orders cannot be counted.', policy)
+        _publish_product_quantities(connection, profile, relations, semantic, sales, readme, rulebook, publish)
+        return semantic
     if len(bases) != 1:
         if orders or items:
             issue('ORDER_SYSTEM_AMBIGUOUS', 'No unique validated order system can establish whole-order eligibility.')
@@ -546,16 +738,7 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
     if missing_ids:
         issue('MISSING_ORDER_ID', 'Missing order identifiers prevent complete whole-order filtering.', base['name'], missing_ids)
         return semantic
-    values = [r[0] for r in connection.execute(f'SELECT DISTINCT {_q(status)} FROM {bq}').fetchall()]
-    cases = []
-    for value in values:
-        if value is None or not str(value).strip():
-            continue
-        state = classify_status(value)
-        if text_key(str(value)) in {'shipping', 'in delivery', 'dang giao', 'dang giao hang'} and policy.get('include_shipping') is not True:
-            state = 'unknown'
-        cases.append(f'WHEN {_q(status)}={_lit(value)} THEN {_lit(state)}')
-    expression = 'CASE ' + ' '.join(cases) + " ELSE 'missing' END" if cases else "'missing'"
+    expression = status_cases(status, bq, base['name'])
     # Unknown nonempty labels remain failures. Only explicitly documented grouped
     # blanks may inherit an established status of the same real order.
     inheritance = 'o de trong o cac dong sau cua cung mot nhom dong' in _words(rulebook)
@@ -604,17 +787,29 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
     if returns_blocked:
         issue('RETURN_EVIDENCE_BLOCKED', 'Incomplete return evidence prevents eligible sales publication.')
         return semantic
-    unknown_sql = "bool_or(state='unknown') OR (bool_or(state='missing') AND NOT bool_or(state IN ('active','cancelled','returned')))" if inheritance else "bool_or(state IN ('unknown','missing'))"
+    unknown_sql = "bool_or(state='unknown') OR (bool_or(state='missing') AND NOT bool_or(state IN ('completed','shipping','cancelled','returned')))" if inheritance else "bool_or(state IN ('unknown','missing'))"
     connection.execute('CREATE TABLE private.order_flags AS SELECT order_id, '
-        "bool_or(state='cancelled') cancelled,bool_or(state='returned') returned," + unknown_sql +
+        "bool_or(state='cancelled') cancelled,bool_or(state='returned') returned,bool_or(state='shipping') shipping," + unknown_sql +
         ' unknown FROM (' + ' UNION ALL '.join(fragments) + ') GROUP BY order_id')
     unknown = connection.execute('SELECT count(*) FROM private.order_flags WHERE unknown').fetchone()[0]
     if unknown:
         issue('UNKNOWN_ORDER_STATUS', 'Eligible sales are blocked by unresolved order status meanings.', base['name'], unknown)
         return semantic
+    candidates = [r for r in items if linked(r, primary)] if primary else [base]
+    item = candidates[0] if len(candidates) == 1 else None
+    derived = ("f.cancelled, f.returned, CASE WHEN f.cancelled THEN 'cancelled' WHEN f.returned THEN 'returned' "
+               "WHEN f.shipping THEN 'shipping' ELSE 'completed' END AS order_state, "
+               '(NOT f.cancelled AND NOT f.returned) AS counts_as_sale')
     if primary:
         selected = ','.join(f'b.{_q(column)} AS {_q(role)}' for role, column in roles.items())
-        sql = f'SELECT {selected}, f.cancelled, f.returned FROM {bq} b JOIN private.order_flags f ON b.{_q(oid)}=f.order_id'
+        sql = f'SELECT {selected}, {derived}'
+        source = f' FROM {bq} b JOIN private.order_flags f ON b.{_q(oid)}=f.order_id'
+        if item and 'line_amount' in item['roles'] and 'revenue' not in roles:
+            ir = item['roles']
+            sql += ', x.revenue'
+            source += (f' LEFT JOIN (SELECT {_q(ir["order_id"])} id, SUM({_q(ir["line_amount"])}) revenue '
+                       f'FROM {_relation_sql(item)} GROUP BY 1) x ON b.{_q(oid)}=x.id')
+        sql += source
     else:
         when = roles.get('order_date')
         if not when:
@@ -626,25 +821,37 @@ def _relations_and_semantics(connection, profile, relations, readme, rulebook):
         if conflicts:
             issue('ORDER_GRAIN_UNRESOLVED', 'Order dates are missing or do not functionally depend on order IDs.', base['name'], conflicts)
             return semantic
-        sql = (f'SELECT b.{_q(oid)} order_id, MIN(b.{_q(when)}) order_date, '
-               f'bool_or(f.cancelled) cancelled,bool_or(f.returned) returned FROM {bq} b '
-               f'JOIN private.order_flags f ON b.{_q(oid)}=f.order_id GROUP BY 1')
+        # Order-level facts recorded on lines are published only when they are constant within each order.
+        carried = []
+        for role in ('customer_id', 'customer_name', 'payment_method', 'channel', 'employee', 'created_at'):
+            column = roles.get(role)
+            if column and connection.execute(f'SELECT count(*) FROM (SELECT {_q(oid)} FROM {bq} GROUP BY 1 '
+                                             f'HAVING count(DISTINCT {_q(column)})>1)').fetchone()[0] == 0:
+                carried.append(f'MIN(b.{_q(column)}) AS {_q(role)}')
+        amount = f', SUM(b.{_q(roles["line_amount"])}) AS revenue' if 'line_amount' in roles else ''
+        sql = (f'SELECT b.{_q(oid)} order_id, MIN(b.{_q(when)}) order_date' + ''.join(', ' + c for c in carried) + amount +
+               ', bool_or(f.cancelled) cancelled, bool_or(f.returned) returned, '
+               "CASE WHEN bool_or(f.cancelled) THEN 'cancelled' WHEN bool_or(f.returned) THEN 'returned' "
+               "WHEN bool_or(f.shipping) THEN 'shipping' ELSE 'completed' END AS order_state, "
+               '(NOT bool_or(f.cancelled) AND NOT bool_or(f.returned)) AS counts_as_sale '
+               f'FROM {bq} b JOIN private.order_flags f ON b.{_q(oid)}=f.order_id GROUP BY 1')
     order_view = publish('semantic.orders', 'order', sql, [base],
-                        'Verified order facts across the complete timeline.', keys=['order_id'])
+                        'Every order, one row each, with its rulebook state. Filter counts_as_sale for ordinary '
+                        "revenue and order counts; use order_state='cancelled' to count cancelled orders.", keys=['order_id'])
     eligible = publish('semantic.eligible_orders', 'order',
         'SELECT * FROM semantic.orders WHERE NOT cancelled AND NOT returned', [order_view],
-        'Ordinary sales orders under the supplied rulebook; explicit questions may require all orders.', policy, ['order_id'])
-    candidates = [r for r in items if linked(r, primary)] if primary else [base]
-    if len(candidates) == 1:
-        item = candidates[0]
-        selected = ','.join(f'i.{_q(column)} AS {_q(role)}' for role, column in item['roles'].items())
+        'Orders that count for revenue and order counts (not cancelled, not returned). One row per order.', policy, ['order_id'])
+    if item:
+        selected = [f'i.{_q(column)} AS {_q(role)}' for role, column in item['roles'].items()]
+        for role in ('order_date', 'customer_id', 'customer_name', 'payment_method', 'channel', 'employee'):
+            if role not in item['roles'] and role in order_view['roles']:
+                selected.append(f'o.{_q(role)} AS {_q(role)}')
         sales = publish('semantic.eligible_sales_lines', 'order_item',
-            f'SELECT {selected} FROM {_relation_sql(item)} i JOIN semantic.eligible_orders o '
-            f'ON i.{_q(item["roles"]["order_id"])}=o.order_id', [item],
-            'Recorded sales fields with entire cancelled/returned orders excluded.', policy)
+            f'SELECT {",".join(selected)} FROM {_relation_sql(item)} i JOIN semantic.eligible_orders o '
+            f'ON i.{_q(item["roles"]["order_id"])}=o.order_id', [item, order_view],
+            'Sales lines of orders that count for revenue; SUM(line_amount) over a date range is the revenue.', policy)
         _publish_product_quantities(connection, profile, relations, semantic, sales, readme, rulebook, publish)
     return semantic
-
 
 def _publish_product_quantities(connection, profile, relations, semantic, sales, readme, rulebook, publish):
     """Use recorded base quantities or fully checked explicit unit equations."""
@@ -660,8 +867,24 @@ def _publish_product_quantities(connection, profile, relations, semantic, sales,
                 relation='semantic.product_quantities', count=missing,
                 message='Eligible sales contain missing base quantities; aggregation would omit unknown values.'))
             return
-        publish('semantic.product_quantities', 'order_item', 'SELECT * FROM semantic.eligible_sales_lines', [sales],
-                'Eligible sales with recorded, validated product base quantities.')
+        sql, sources = 'SELECT * FROM semantic.eligible_sales_lines', [sales]
+        identity = 'product_id' if 'product_id' in roles else 'product_name'
+        catalogues = [r for r in relations if r['grain'] == 'product' and identity in r['roles']
+                      and r['keys'] == [r['roles'][identity]]]
+        if len(catalogues) == 1:
+            # A verified catalogue supplies the product's base unit, name and group without multiplying rows.
+            cr = catalogues[0]['roles']
+            extra = [f'p.{_q(cr[role])} AS {_q(role)}' for role in ('base_unit', 'product_name', 'product_group')
+                     if role in cr and role not in roles]
+            if 'base_unit' not in cr and 'base_unit' not in roles and 'unit' in cr:
+                extra.append(f'p.{_q(cr["unit"])} AS base_unit')
+            if extra:
+                sql = ('SELECT s.*, ' + ', '.join(extra) + ' FROM semantic.eligible_sales_lines s LEFT JOIN ' +
+                       _relation_sql(catalogues[0]) + f' p ON s.{_q(identity)}=p.{_q(cr[identity])}')
+                sources = [sales, catalogues[0]]
+        publish('semantic.product_quantities', 'order_item', sql, sources,
+                'Sales lines that count for revenue, with base_quantity in the product base unit (base_unit). '
+                'Units sold of a given base unit = SUM(base_quantity) WHERE base_unit = that unit.')
         return
     if not {'quantity', 'unit'} <= roles.keys():
         return
@@ -770,6 +993,9 @@ def _publish_product_quantities(connection, profile, relations, semantic, sales,
 def _schema(connection, profile, relations, readme, rulebook):
     from .parsers import text_key
     semantic = _relations_and_semantics(connection, profile, relations, readme, rulebook)
+    from .views import publish_debt_views, publish_stock_view, snapshot_dates
+    semantic = semantic + publish_debt_views(connection, relations, semantic, rulebook)
+    semantic = semantic + publish_stock_view(connection, relations, readme, snapshot_dates(relations, readme))
     by_name = {r['name']: r for r in relations + semantic}
     clean_roles = {role for r in relations for role in r['roles']}
     documented_roles, populated_roles, blocked_roles = set(), set(), set()

@@ -8,7 +8,8 @@ checked against the bundle's relation allowlist before it runs.
 import json
 import re
 import threading
-from decimal import Decimal
+from datetime import date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 from smolagents.models import ChatMessage, MessageRole
@@ -23,28 +24,55 @@ QUERY_SECONDS = 15
 
 INSTRUCTIONS = """You answer one Vietnamese business question by querying a prepared DuckDB database.
 The tables are already cleaned and typed: dates are DATE/TIMESTAMP, money and quantities are DECIMAL.
-Use only the relations and columns listed in the schema. Prefer semantic.* relations when they fit.
+Use only the relations and columns listed in the schema.
 
 Reply with exactly one fenced block and nothing after it:
 - To run a query, a ```sql block containing a single SELECT (WITH is allowed).
 - To finish, a ```json block containing the typed answer, for example {"type": "number", "answer": 10}.
 
+How to choose a relation:
+- The semantic.* relations already apply the rulebook (which orders count, debt, stock, base units).
+  Use the one whose description matches the question and follow the "Query patterns" given with the schema.
+- Use clean.* tables only when no semantic relation covers the question.
+
 Rules:
-- Resolve relative time ("hôm nay", "hôm qua", "tuần rồi", "tháng này") from as_of_date, never from the system date.
-- Rows dated after as_of_date have not happened yet: filter the date column to <= DATE 'as_of_date'.
-  Cancellation and return status still applies to an order even when recorded later.
-- Apply the rulebook: ordinary revenue and order counts exclude cancelled and returned orders unless the question says otherwise.
-- Count distinct order IDs, not rows. Line tables repeat an order ID once per product.
-- Filter text labels only with values shown in "Observed labels" or returned by a query. To find a product or
-  customer named in the question, search first, e.g. WHERE strip_accents(lower(col)) LIKE '%tra vai%'.
-- If a query returns no rows or NULL, do not conclude 0 or unanswerable: check the filter values and retry.
+- Take dates from the "Dates" block; never compute "today" yourself. Each range there is inclusive.
+- For a question about a day or a period, filter the date column to exactly that day or range.
+- Filter text labels only with values shown in "Observed labels" or returned by a query.
+- To match a product or customer named in the question, use name_like(column, 'text'): it ignores accents and
+  letter case, for example WHERE name_like(product_name, 'trà vải'). Never compare names with = or LIKE.
+- Questions are often typed without accents or with chat abbreviations: hnay = hôm nay, hqua = hôm qua,
+  dthu = doanh thu, bn = bao nhiêu, sp = sản phẩm, dc/đc = được, ko/k = không, kh = khách hàng, sl = số lượng.
+- If the asked period lies entirely outside "Data coverage", answer
+  {"type": "unanswerable", "reason": "..."} without guessing. Also use unanswerable when the business does not
+  record the information at all.
+- If a query inside the data coverage returns no rows or NULL, check the filter values and retry; do not
+  conclude 0 or unanswerable from a wrong filter.
+- If a needed column is withheld, or you are unsure, answer {"type": "abstain", "reason": "..."}.
 - Answer types: number, percent, string, date (YYYY-MM-DD or YYYY-MM), boolean, list, table
-  ({"columns": [...], "rows": [[...]]}), unanswerable, abstain. Follow the rulebook for rounding and formats.
-- Use {"type": "unanswerable", "reason": "..."} only when the business never records the information or the
-  period is entirely outside the data. If a needed column is withheld, or you are unsure, use
-  {"type": "abstain", "reason": "..."}.
-- Give the final answer only from a query result you have seen.
+  ({"columns": [...], "rows": [[...]]}), unanswerable, abstain. Money is a whole number of VND.
+  A question asking for several numbers is a list in the order asked.
+- Give the final answer only from a query result you have seen, copying the value exactly.
 """
+
+PATTERNS = (
+    ('semantic.eligible_sales_lines', 'Revenue (doanh thu, tiền bán, bán được bao nhiêu tiền) in a period',
+     "SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
+    ('semantic.eligible_orders', 'Number of orders (số đơn) in a period',
+     "SELECT COUNT(*) FROM semantic.eligible_orders WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
+    ('semantic.eligible_orders', 'Average revenue per order (doanh thu bình quân mỗi đơn)',
+     "SELECT ROUND(SUM(revenue) / COUNT(*)) FROM semantic.eligible_orders WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
+    ('semantic.orders', 'Cancelled orders (đơn huỷ) in a period; all orders regardless of state use no state filter',
+     "SELECT COUNT(*) FROM semantic.orders WHERE order_state = 'cancelled' AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
+    ('semantic.product_quantities', 'Units sold of a base unit (bán được bao nhiêu <đơn vị>), all products with that base unit',
+     "SELECT SUM(base_quantity) FROM semantic.product_quantities WHERE base_unit = 'gói' AND order_date = DATE '2025-06-30'"),
+    ('semantic.debt_as_of', 'Total customer debt at the end of a date (còn nợ tính đến hết ngày X)',
+     "SELECT SUM(outstanding) FROM semantic.debt_as_of(DATE '2025-06-30')"),
+    ('semantic.debt_repayments', 'Debt repaid / collected in a period (trả nợ, thu nợ, thu hồi công nợ)',
+     "SELECT SUM(amount) FROM semantic.debt_repayments WHERE repayment_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
+    ('semantic.stock_snapshot', 'Stock of a product in large units (còn mấy hộp chẵn, mấy cái lẻ), answer as list [whole, loose]',
+     "SELECT whole_large_units, loose_base_units FROM semantic.stock_snapshot WHERE name_like(product_name, 'tên hàng')"),
+)
 
 
 class QueryRejected(ValueError):
@@ -83,7 +111,8 @@ def _walk(node, tables, ctes, functions):
         if kind == 'BASE_TABLE':
             tables.append((node.get('catalog_name') or '', node.get('schema_name') or '', node.get('table_name') or ''))
         elif kind == 'TABLE_FUNCTION':
-            functions.append(kind)
+            call = node.get('function') or {}
+            functions.append(((call.get('schema') or '').lower(), (call.get('function_name') or '').lower()))
         for entry in (node.get('cte_map') or {}).get('map', []):
             ctes.add(entry['key'].lower())
         for value in node.values():
@@ -118,9 +147,10 @@ def check_query(connection, sql, allowed):
         raise QueryRejected('Send exactly one SELECT statement')
     tables, ctes, functions = [], set(), []
     _walk(parsed, tables, ctes, functions)
-    if functions:
-        raise QueryRejected('Table functions are not allowed; query the listed relations')
     basenames = {name.split('.', 1)[1] for name in allowed}
+    for schema, name in functions:
+        if f'{schema}.{name}' not in allowed and not (not schema and name in basenames):
+            raise QueryRejected('Table functions are not allowed; query the listed relations')
     for catalog, schema, table in tables:
         schema, table = schema.lower(), table.lower()
         if catalog:
@@ -172,7 +202,8 @@ def run_query(connection, sql, allowed):
     lines = [' | '.join(columns)] + [' | '.join(_cell(value) for value in row) for row in rows[:MAX_ROWS]]
     note = f'{total} row(s)' + (f'; first {MAX_ROWS} shown' if more else '')
     if total == 0:
-        note += '. No rows matched: check filter values and dates before concluding anything.'
+        note += ('. No rows matched: check the filter values and dates before concluding anything. '
+                 "Match names with name_like(column, 'text').")
     return ('\n'.join(lines) + '\n' + note)[:MAX_RESULT_CHARS]
 
 
@@ -192,23 +223,31 @@ def describe_schema(connection, schema):
         schema: Parsed ``schema.json`` dictionary.
 
     Returns:
-        A (text, allowed) pair: prompt text listing relations, columns,
-        withheld columns, capabilities and date coverage, and the set of
-        lower-case allowlisted relation names. Label columns with at most
-        MAX_LABELS distinct values list those values; identifier, name and
-        free-text columns never do.
+        A (text, allowed) pair: prompt text listing rulebook-defined semantic
+        relations first, then cleaned source tables, with query patterns for
+        the relations this bundle has and the observed sales date range; and
+        the set of lower-case allowlisted relation and function names. Label
+        columns with at most MAX_LABELS distinct values list those values;
+        identifier, name and free-text columns never do.
     """
-    lines, allowed = [], set()
+    allowed = set()
     quoted = lambda name: '.'.join('"' + part.replace('"', '""') + '"' for part in name.split('.'))
-    for relation in schema.get('relations', []):
+
+    def render(relation):
         name = relation['name']
         allowed.add(name.lower())
-        lines.append(f"{name}  (one row per {relation.get('grain', 'unknown')}; {relation.get('rows', '?')} rows)")
+        if relation.get('function'):
+            lines = [f"{relation.get('signature', name)}  (table function; one row per {relation.get('grain', 'row')})"]
+        else:
+            lines = [f"{name}  (one row per {relation.get('grain', 'unknown')})"]
+        if relation.get('meaning'):
+            lines.append('  ' + relation['meaning'])
         for column in relation.get('columns', []):
-            meaning = (column.get('meaning') or column.get('source_alias') or '').replace('\n', ' ')[:120]
+            meaning = (column.get('meaning') or column.get('source_alias') or '').replace('\n', ' ')[:140]
             line = f"  - {column['name']} {column['type']}: {meaning}"
             role = column.get('role') or ''
-            if column['type'] == 'VARCHAR' and not any(word in role for word in ('name', 'id', 'note', 'phone', 'address')):
+            if (not relation.get('function') and column['type'] == 'VARCHAR'
+                    and not any(word in role for word in ('name', 'id', 'note', 'phone', 'address'))):
                 labels = _labels(connection, quoted(name), column['name'])
                 if labels:
                     line += ' | Observed labels: ' + json.dumps(labels, ensure_ascii=False)
@@ -216,16 +255,98 @@ def describe_schema(connection, schema):
         withheld = relation.get('blocked_columns') or []
         if withheld:
             lines.append('  Withheld (failed cleaning, cannot be queried): ' + ', '.join(str(item) for item in withheld))
-        lines.append('')
-    ready = [f"{name} -> {value['relation']}" for name, value in schema.get('capabilities', {}).items()
-             if value.get('status') == 'available' and value.get('relation')]
-    if ready:
-        lines += ['Ready-made relations: ' + '; '.join(ready), '']
-    coverage = [f"{value.get('role')}: {value.get('observed_min')} to {value.get('observed_max')}"
-                for value in schema.get('temporal_coverage', {}).values() if isinstance(value, dict) and value.get('observed_min')]
-    if coverage:
-        lines.append('Observed date ranges: ' + '; '.join(sorted(set(coverage))))
+        return lines + ['']
+
+    relations = schema.get('relations', [])
+    semantic = [r for r in relations if r['name'].startswith('semantic.')]
+    clean = [r for r in relations if not r['name'].startswith('semantic.')]
+    lines = []
+    if semantic:
+        lines += ['## Rulebook-ready relations (use these first)', '']
+        for relation in semantic:
+            lines += render(relation)
+    lines += ['## Cleaned source tables', '']
+    for relation in clean:
+        lines += render(relation)
+    patterns = [f'- {title}:\n  {sql}' for name, title, sql in PATTERNS if name in allowed]
+    if patterns:
+        lines += ['## Query patterns (replace dates, units and names)', *patterns, '']
+    for name, column in (('semantic.orders', 'order_date'), ('semantic.eligible_sales_lines', 'order_date')):
+        relation = next((r for r in semantic if r['name'] == name), None)
+        if relation and any(c['name'] == column for c in relation['columns']):
+            first, last = connection.execute(f'SELECT MIN({column}), MAX({column}) FROM {name}').fetchone()
+            if first and last:
+                lines.append(f'## Data coverage\nSales records run from {first} to {last}. '
+                             'A period entirely before or after this range has no data: unanswerable, not 0.')
+            break
+    else:
+        coverage = sorted({f"{value.get('role')}: {value.get('observed_min')} to {value.get('observed_max')}"
+                           for value in schema.get('temporal_coverage', {}).values()
+                           if isinstance(value, dict) and value.get('observed_min')})
+        if coverage:
+            lines.append('## Data coverage\nObserved date ranges: ' + '; '.join(coverage))
     return '\n'.join(lines), allowed
+
+
+def date_block(as_of_date):
+    """List the rulebook's relative periods as explicit inclusive date ranges for one reference date."""
+    today = date.fromisoformat(as_of_date)
+    monday = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+    previous_end = month_start - timedelta(days=1)
+    previous_start = previous_end.replace(day=1)
+    same_day = previous_start.replace(day=min(today.day, previous_end.day))
+    quarter_start = date(today.year, 3 * ((today.month - 1) // 3) + 1, 1)
+    span = lambda first, last: f'{first.isoformat()} to {last.isoformat()}'
+    return '\n'.join([
+        f'today (hôm nay, hnay, bữa nay): {today.isoformat()}',
+        f'yesterday (hôm qua, hqua, bữa qua): {(today - timedelta(days=1)).isoformat()}',
+        f'this week (tuần này): {span(monday, today)}',
+        f'last week (tuần trước, tuần rồi): {span(monday - timedelta(days=7), monday - timedelta(days=1))}',
+        f'this month (tháng này): {span(month_start, today)}',
+        f'last month, whole (tháng trước): {span(previous_start, previous_end)}',
+        f'last month, same number of days (so với tháng trước): {span(previous_start, same_day)}',
+        f'this quarter to date (quý này): {span(quarter_start, today)}',
+        f'this year to date (từ đầu năm): {span(date(today.year, 1, 1), today)}',
+        f'last 7 days (7 ngày gần nhất): {span(today - timedelta(days=6), today)}',
+        f'last 30 days (30 ngày gần nhất): {span(today - timedelta(days=29), today)}',
+        'A month or quarter named without a year is this year\'s if it does not start after today, otherwise last year\'s.',
+        'Records dated after today have not happened yet.',
+    ])
+
+
+_NUMERIC_TEXT = re.compile(r'-?(?:0|[1-9]\d*)(?:\.\d+)?')
+
+
+def _number(value):
+    """Turn numeric text or an integral float into a JSON number; leave codes and other text unchanged."""
+    if isinstance(value, str) and _NUMERIC_TEXT.fullmatch(value.strip()):
+        value = float(value) if '.' in value else int(value)
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def normalize_answer(answer):
+    """Apply the answer format rules that do not depend on the question.
+
+    Numbers written as text become JSON numbers (text with a leading zero is a
+    code and stays text), integral floats become integers, and percentages are
+    rounded half-up to two decimals. Other values are returned unchanged.
+    """
+    if not isinstance(answer, dict) or 'answer' not in answer:
+        return answer
+    kind, value = answer.get('type'), answer['answer']
+    if kind in ('number', 'percent'):
+        value = _number(value)
+        if kind == 'percent' and isinstance(value, float):
+            value = float(Decimal(repr(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+    elif kind == 'list' and isinstance(value, list):
+        value = [_number(item) for item in value]
+    elif kind == 'table' and isinstance(value, dict) and isinstance(value.get('rows'), list):
+        value = {**value, 'rows': [[_number(cell) for cell in row] if isinstance(row, list) else row
+                                   for row in value['rows']]}
+    return {**answer, 'answer': value}
 
 
 def _block(text):
@@ -270,13 +391,16 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                                         'autoload_known_extensions': False, 'memory_limit': '1GB', 'threads': 2})
     try:
         connection.execute("SET search_path='semantic,clean'")
+        connection.execute("CREATE TEMP MACRO name_like(col, txt) AS strip_accents(lower(CAST(col AS VARCHAR))) "
+                           "LIKE '%' || strip_accents(lower(trim(txt))) || '%'")
         connection.execute('SET lock_configuration=true')
         schema_text, allowed = describe_schema(connection, schema)
         context = '\n\n'.join([
             '# Rulebook\n' + rulebook,
             '# Business README\n' + (readme.read_text(encoding='utf-8') if readme.exists() else ''),
             '# Schema\n' + schema_text,
-            f"# Question\nas_of_date: {question['as_of_date']}\n{question['question']}",
+            '# Dates\n' + date_block(question['as_of_date']),
+            '# Question\n' + question['question'],
         ])
         emit({'stage': 'schema', 'text': schema_text})
         text = lambda role, value: ChatMessage(role=role, content=[{'type': 'text', 'text': value}])
@@ -294,11 +418,11 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                 kind, body = _block(content)
                 if kind == 'json':
                     try:
-                        answer = validate_answer(json.loads(body))
+                        answer = validate_answer(normalize_answer(json.loads(body)))
                     except (ValueError, TypeError) as error:
                         feedback = f'Invalid final answer: {error}. Send a ```json block with a valid typed answer.'
                     else:
-                        if succeeded or answer['type'] == 'abstain':
+                        if succeeded or answer['type'] in ('abstain', 'unanswerable'):
                             return answer
                         feedback = 'Run a query first; answer only from a query result.'
                 elif kind in ('sql', '') and body:
