@@ -59,7 +59,8 @@ Rules:
 - Give the final answer only from a query result you have seen, copying the value exactly.
 """
 
-# (relation, columns the pattern needs, what it answers, query). A pattern is shown only when the bundle has them.
+# (relation, columns the pattern needs, what it answers, query[, question kind]). A pattern is shown only when the
+# bundle has the columns; one with a question kind is shown only for that kind of question (see _PATTERN_KINDS).
 PATTERNS = (
     ('semantic.eligible_sales_lines', ('line_amount', 'order_date'),
      'Revenue (doanh thu, tiền bán, bán được bao nhiêu tiền) in a period',
@@ -69,20 +70,32 @@ PATTERNS = (
      "SELECT order_date FROM semantic.eligible_sales_lines WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' "
      "GROUP BY order_date ORDER BY SUM(line_amount) DESC, order_date LIMIT 1"),
     ('semantic.period_comparison', ('revenue_change_percent',),
-     'Change of revenue against the previous period or the same period earlier (so với tháng trước / cùng kỳ, '
-     'tăng hay giảm bao nhiêu %), answer type percent; asked period first, base period second, both from the Dates block. '
-     'Use revenue_difference for a difference in money, orders_change_percent for orders',
-     "SELECT revenue_change_percent FROM semantic.period_comparison(DATE '2025-06-01', DATE '2025-06-30', DATE '2025-05-01', DATE '2025-05-31')"),
+     'Percent change of revenue against an earlier period (so với tháng trước / cùng kỳ, tăng hay giảm bao nhiêu %), '
+     'answer type percent; asked period first, earlier period second, both from the Date phrases. '
+     'Use revenue_difference for a difference in money',
+     "SELECT revenue_change_percent FROM semantic.period_comparison(DATE '2025-06-01', DATE '2025-06-30', DATE '2025-05-01', DATE '2025-05-31')",
+     'comparison'),
+    ('semantic.period_comparison', ('orders_change_percent',),
+     'Percent change of the order count against an earlier period (số đơn tăng hay giảm bao nhiêu %), answer type percent',
+     "SELECT orders_change_percent FROM semantic.period_comparison(DATE '2025-06-01', DATE '2025-06-30', DATE '2025-05-01', DATE '2025-05-31')",
+     'comparison'),
     ('semantic.group_revenue_share', ('share_percent',),
      'Share of revenue of one product group (nhóm hàng ... chiếm bao nhiêu %, tỉ trọng nhóm), answer type percent',
      "SELECT share_percent FROM semantic.group_revenue_share(DATE '2025-06-01', DATE '2025-06-30') WHERE name_is(product_group, 'tên nhóm')"),
-    ('semantic.shift_summary', ('revenue', 'orders'),
-     "Revenue or order count of one shift (ca sáng = 'morning', ca chiều = 'afternoon'); use orders for số đơn / bill",
-     "SELECT revenue FROM semantic.shift_summary(DATE '2025-06-01', DATE '2025-06-30') WHERE shift = 'morning'"),
+    ('semantic.shift_summary', ('revenue',),
+     "Revenue of one shift (ca sáng = 'morning', ca chiều = 'afternoon'; bán được bao nhiêu tiền)",
+     "SELECT revenue FROM semantic.shift_summary(DATE '2025-06-01', DATE '2025-06-30') WHERE shift = 'morning'", 'shift'),
+    ('semantic.shift_summary', ('orders',),
+     "Number of orders of one shift (số đơn, bill ca sáng / ca chiều)",
+     "SELECT orders FROM semantic.shift_summary(DATE '2025-06-01', DATE '2025-06-30') WHERE shift = 'afternoon'", 'shift'),
     ('semantic.shift_summary', ('revenue_vs_morning_percent',),
-     'Afternoon shift compared with the morning shift in percent (ca chiều so với ca sáng chênh bao nhiêu %), answer type '
-     'percent; use orders_vs_morning_percent for the order count',
-     "SELECT revenue_vs_morning_percent FROM semantic.shift_summary(DATE '2025-06-01', DATE '2025-06-30') WHERE shift = 'afternoon'"),
+     'Afternoon revenue compared with the morning in percent (doanh thu ca chiều so với ca sáng chênh bao nhiêu %), answer type percent',
+     "SELECT revenue_vs_morning_percent FROM semantic.shift_summary(DATE '2025-06-01', DATE '2025-06-30') WHERE shift = 'afternoon'",
+     'shift'),
+    ('semantic.shift_summary', ('orders_vs_morning_percent',),
+     'Afternoon order count compared with the morning in percent (số đơn ca chiều so với ca sáng chênh bao nhiêu %), answer type percent',
+     "SELECT orders_vs_morning_percent FROM semantic.shift_summary(DATE '2025-06-01', DATE '2025-06-30') WHERE shift = 'afternoon'",
+     'shift'),
     ('semantic.eligible_orders', ('order_date',), 'Number of orders (số đơn) in a period',
      "SELECT COUNT(*) FROM semantic.eligible_orders WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
     ('semantic.eligible_orders', ('order_date', 'revenue'), 'Average revenue per order (doanh thu bình quân mỗi đơn)',
@@ -234,7 +247,11 @@ def _cell(value):
     return text if len(text) <= 80 else text[:77] + '...'
 
 
-def run_query(connection, sql, allowed, cells=None):
+# A query that multiplies by 100 returns percentages.
+_TIMES_100 = re.compile(r'(?<![\w.])100(?:\.0*)?\s*\*|\*\s*100(?:\.0*)?(?![\w.])')
+
+
+def run_query(connection, sql, allowed, cells=None, percent_cells=None):
     """Run one checked query and return a bounded text result.
 
     Args:
@@ -242,6 +259,9 @@ def run_query(connection, sql, allowed, cells=None):
         sql: Generated SQL text.
         allowed: Allowlisted ``schema.table`` names.
         cells: Optional list replaced with the numeric cells of the shown rows.
+        percent_cells: Optional list replaced with the shown numeric cells that
+            are already percentages: those of a column named like ``*percent*``,
+            or every numeric cell when the query multiplies by 100.
 
     Returns:
         Text with the column names, up to MAX_ROWS rows and the total row
@@ -262,10 +282,15 @@ def run_query(connection, sql, allowed, cells=None):
         total = MAX_ROWS + len(cursor.fetchall()) + 1 if more else len(rows)
     finally:
         timer.cancel()
+    numeric = lambda value: isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
     if cells is not None:
         cells.clear()
-        cells.extend(value for row in rows[:MAX_ROWS] for value in row
-                     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool))
+        cells.extend(value for row in rows[:MAX_ROWS] for value in row if numeric(value))
+    if percent_cells is not None:
+        scaled = _TIMES_100.search(sql) is not None
+        percent_cells.clear()
+        percent_cells.extend(value for row in rows[:MAX_ROWS] for name, value in zip(columns, row)
+                             if numeric(value) and (scaled or 'percent' in name.lower()))
     lines = [' | '.join(columns)] + [' | '.join(_cell(value) for value in row) for row in rows[:MAX_ROWS]]
     note = f'{total} row(s)' + (f'; first {MAX_ROWS} shown' if more else '')
     if total == 0:
@@ -282,12 +307,15 @@ def _labels(connection, relation, column):
     return None
 
 
-def describe_schema(connection, schema):
+def describe_schema(connection, schema, question=None):
     """Render the published schema as compact prompt text.
 
     Args:
         connection: Read-only DuckDB connection to the bundle.
         schema: Parsed ``schema.json`` dictionary.
+        question: Optional question text. When given, patterns for a kind of
+            question (a comparison with an earlier period, a shift) are shown
+            only when the question is of that kind.
 
     Returns:
         A (text, allowed) pair: prompt text listing rulebook-defined semantic
@@ -336,8 +364,9 @@ def describe_schema(connection, schema):
     for relation in clean:
         lines += render(relation)
     published = {relation['name']: {column['name'] for column in relation.get('columns', [])} for relation in relations}
-    patterns = [f'- {title}:\n  {sql}' for name, needed, title, sql in PATTERNS
-                if name in published and set(needed) <= published[name]]
+    patterns = [f'- {title}:\n  {sql}' for name, needed, title, sql, *kind in PATTERNS
+                if name in published and set(needed) <= published[name]
+                and (question is None or not kind or _PATTERN_KINDS[kind[0]](question))]
     if patterns:
         lines += ['## Query patterns (replace dates, units and names)', *patterns, '']
     coverage = sales_coverage(connection, schema)
@@ -400,6 +429,38 @@ _PHRASES = (
 )
 
 
+# Words naming the period before (or a year before) the asked one. Beside a named month or quarter they make the
+# question a comparison with that earlier period; without them a named period is only the period itself.
+_EARLIER = tuple(sorted(set(dict(_PHRASES)['last month']) | {
+    'cung ky', 'ky truoc', 'ky trc', 'truoc do', 'trc do', 'lien truoc', 'lien trc', 'tang truong',
+    'quy truoc', 'quy trc', 'quy roi', 'nam truoc', 'nam trc', 'nam ngoai', 'nam roi'}))
+# Words of change or comparison. A bare "so" is not one: "số" (number) folds to it.
+_COMPARE = ('so voi', 'so vs', 'tang', 'giam', 'chenh', 'hon hay kem', 'thay doi')
+
+
+def mentions_earlier_period(question):
+    """True when the question names the period before, or a year before, the one it asks about."""
+    folded = f' {_fold(question)} '
+    return any(f' {cue} ' in folded for cue in _EARLIER)
+
+
+def asks_shift(question):
+    """True when the question is about the morning or afternoon shift."""
+    return re.search(r' ca (?:sang|chieu)', f' {_fold(question)} ') is not None
+
+
+def compares_periods(question):
+    """True when the question compares a period with another period, not the two shifts of one period."""
+    if mentions_earlier_period(question):
+        return True
+    # "giảm giá" (discount) and the group "giảm đau" (pain relief) are not a fall.
+    folded = f' {_fold(question)} '.replace(' giam gia ', ' ').replace(' giam dau ', ' ')
+    return not asks_shift(question) and any(f' {cue} ' in folded for cue in _COMPARE)
+
+
+_PATTERN_KINDS = {'comparison': compares_periods, 'shift': asks_shift}
+
+
 # Accent-, case- and spacing-insensitive comparison key; strip_accents keeps the letter đ, so it is folded separately.
 _FOLD_SQL = "replace(lower(strip_accents(trim(regexp_replace({}, '\\s+', ' ', 'g')))), 'đ', 'd')"
 
@@ -454,22 +515,24 @@ def date_phrases(question, as_of_date):
             return f'the same {unit} a year earlier is {span(*months(first.replace(year=first.year - 1), count))}'
         return f'the {unit} before it is {span(*before(first, count))}'
 
-    year_ago = re.search(r' cung ky (?:cua )?nam (?:truoc|ngoai|roi|trc) ', folded) is not None
-    named = False
+    year_ago = re.search(r' cung (?:ky|thang|quy) (?:cua )?nam (?:truoc|ngoai|roi|trc) ', folded) is not None
     # "thangs" is "tháng" typed with an unconverted Telex tone key.
-    for match in re.finditer(r'(?<= )(?:thang|thangs|thg|th) (\d{1,2})(?:(?: nam)? (\d{4}))?(?= )', folded):
+    month_matches = [match for match in re.finditer(r'(?<= )(?:thang|thangs|thg|th) (\d{1,2})(?:(?: nam)? (\d{4}))?(?= )', folded)
+                     if 1 <= int(match.group(1)) <= 12]
+    quarter_matches = [match for match in re.finditer(r'(?<= )quy (\d)(?:(?: nam)? (\d{4}))?(?= )', folded)
+                       if 1 <= int(match.group(1)) <= 4]
+    # The earlier period is given only when the question compares one named period with the one before it;
+    # otherwise the model used it as the asked period. With two named periods the question names its own base.
+    earlier = mentions_earlier_period(question) and len(month_matches) + len(quarter_matches) == 1
+    for match in month_matches:
         month = int(match.group(1))
-        if 1 <= month <= 12:
-            first, last = months(date(year_for(month, match.group(2)), month, 1), 1)
-            lines.append(f'- "{match.group(0)}" means {span(first, last)}; {base(first, 1, "month")}')
-            named = True
-    for match in re.finditer(r'(?<= )quy (\d)(?:(?: nam)? (\d{4}))?(?= )', folded):
-        quarter = int(match.group(1))
-        if 1 <= quarter <= 4:
-            start = 3 * quarter - 2
-            first, last = months(date(year_for(start, match.group(2)), start, 1), 3)
-            lines.append(f'- "{match.group(0)}" means {span(first, last)}; {base(first, 3, "quarter")}')
-            named = True
+        first, last = months(date(year_for(month, match.group(2)), month, 1), 1)
+        lines.append(f'- "{match.group(0)}" means {span(first, last)}' + (f'; {base(first, 1, "month")}' if earlier else ''))
+    for match in quarter_matches:
+        start = 3 * int(match.group(1)) - 2
+        first, last = months(date(year_for(start, match.group(2)), start, 1), 3)
+        lines.append(f'- "{match.group(0)}" means {span(first, last)}' + (f'; {base(first, 3, "quarter")}' if earlier else ''))
+    named = bool(month_matches or quarter_matches)
     for name, phrases in _PHRASES:
         found = next((phrase for phrase in phrases if f' {phrase} ' in folded), None)
         if found and not (named and name == 'last month'):
@@ -558,9 +621,12 @@ def normalize_answer(answer):
 def asks_percent(question):
     """True when the question asks for a percentage or a rate, whose answer type is percent."""
     folded = f' {_fold(question)} '
-    if any(f' {cue} ' in folded for cue in ('phan tram', 'ti le', 'ty le', 'ti trong', 'ty trong')):
+    # Telex typing leaves doubled vowels and tone keys in a word ("phaanf trawm", "tir leej"), so cue words allow them.
+    if re.search(r' ph[aw]{1,2}[frsxj]?n[frsxj]? tr[aw]{1,2}[frsxj]?m[frsxj]? '
+                 r'| t[iy][frsxj]? l[e]{1,2}[frsxj]? | t[iy][frsxj]? tr[o]{1,2}[frsxj]?ng[frsxj]? ', folded):
         return True
-    return re.search(r'(?:bao nhi[eê]u|bao nhiu|bnhiu|bn|m[aấ]y|nhi[eê]u)\s*%', question.lower()) is not None
+    # A % sign that does not follow a number asks for a percentage ("bao nhiêu %"); "10%" is part of a name.
+    return re.search(r'(?<![\d.,\s])\s*%|(?<![\d.,])\s+%', question) is not None
 
 
 def grounded(value, cells):
@@ -580,15 +646,35 @@ def grounded(value, cells):
     return False
 
 
+def rescaled_percent(value, percent_cells):
+    """The percentage a percent answer meant when it multiplied an already-percent result cell by 100 again, else None."""
+    for cell in percent_cells:
+        number = Decimal(str(cell))
+        if number.is_finite() and number != 0 and grounded(value, [number * 100]):
+            return float(number.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+    return None
+
+
 def _block(text):
-    blocks = re.findall(r'```(\w*)\s*\n(.*?)```', text or '', flags=re.S)
+    """Return (kind, body, held_answer) for a reply.
+
+    A reply that holds both a query and a final answer is read as the query,
+    because an answer written before its result is seen cannot be checked
+    against it; held_answer is then the answer's text, otherwise None.
+    """
+    blocks = [(kind.lower(), body.strip()) for kind, body in re.findall(r'```(\w*)\s*\n(.*?)```', text or '', flags=re.S)]
     if blocks:
+        queries = [block for block in blocks if block[0] == 'sql'
+                   or (block[0] == '' and re.match(r'(?:select|with)\b', block[1], re.I))]
+        answers = [body for kind, body in blocks if kind == 'json']
+        if queries and answers:
+            return queries[0][0], queries[0][1], answers[-1]
         kind, body = blocks[-1]
-        return kind.lower(), body.strip()
+        return kind, body, None
     stripped = (text or '').strip()
     if stripped.startswith('{') and stripped.endswith('}'):
-        return 'json', stripped
-    return None, stripped
+        return 'json', stripped, None
+    return None, stripped, None
 
 
 def answer_question_sql(model, question, business, bundle, rulebook, *, max_steps=6, emit=None):
@@ -629,7 +715,7 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
         connection.execute("CREATE TEMP MACRO name_is(col, txt) AS "
                            f"{_FOLD_SQL.format('CAST(col AS VARCHAR)')} = {_FOLD_SQL.format('CAST(txt AS VARCHAR)')}")
         connection.execute('SET lock_configuration=true')
-        schema_text, allowed = describe_schema(connection, schema)
+        schema_text, allowed = describe_schema(connection, schema, question['question'])
         coverage = sales_coverage(connection, schema)
         context = '\n\n'.join([
             '# Rulebook\n' + rulebook,
@@ -646,9 +732,11 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
         messages = [text(MessageRole.SYSTEM, INSTRUCTIONS), text(MessageRole.USER, context)]
         succeeded = False
         last_sql = ''
+        last_ok_sql = None
         unverified = 0
         ungrounded = 0
-        cells = []
+        percent_refused = False
+        cells, percent_cells = [], []
         with question_span(question):
             for step in range(1, max_steps + 1):
                 response = model.generate(messages)
@@ -658,7 +746,10 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                       'token_usage': {'input_tokens': getattr(usage, 'input_tokens', 0),
                                       'output_tokens': getattr(usage, 'output_tokens', 0)} if usage else {}})
                 messages.append(text(MessageRole.ASSISTANT, content))
-                kind, body = _block(content)
+                kind, body, held_answer = _block(content)
+                if held_answer is not None and ' '.join(body.split()) == last_ok_sql:
+                    # The query repeats the last one whose result the model has seen, so its answer can be checked.
+                    kind, body, held_answer = 'json', held_answer, None
                 if kind == 'json':
                     try:
                         raw_answer = json.loads(body)
@@ -688,31 +779,49 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
                         elif not succeeded:
                             feedback = 'Run a query first; answer only from a query result.'
                         else:
-                            if answer['type'] == 'number' and asks_percent(question['question']):
+                            asked_percent = asks_percent(question['question'])
+                            if answer['type'] == 'number' and asked_percent:
                                 # The question asks for a percentage, so the answer type is percent.
                                 answer = validate_answer(normalize_answer({'type': 'percent', 'answer': answer['answer']}))
                             values = (answer['answer'] if answer['type'] == 'list' else
                                       [answer['answer']] if answer['type'] in ('number', 'percent') else [])
                             numbers = [value for value in values if type(value) in (int, float)]
-                            if all(grounded(value, cells) for value in numbers):
+                            rescaled = (rescaled_percent(answer['answer'], percent_cells)
+                                        if answer['type'] == 'percent' and numbers and not grounded(numbers[0], cells) else None)
+                            if rescaled is not None:
+                                # The cell was already a percentage; multiplying it by 100 again is a copy slip.
+                                answer = {**answer, 'answer': rescaled}
+                                numbers = [rescaled]
+                            if answer['type'] == 'percent' and not asked_percent and not percent_refused:
+                                # A percentage for a question that asks for an amount or a count comes from the
+                                # wrong query; ask once, and accept a second percent answer.
+                                percent_refused = True
+                                feedback = ('Not accepted: the question does not ask for a percentage or a rate. '
+                                            'Answer the amount or count it asks for, from a query that computes it.')
+                            elif all(grounded(value, cells) for value in numbers):
                                 return answer
-                            ungrounded += 1
-                            if ungrounded > 1:
-                                return {'type': 'abstain', 'reason': 'Answer is not a value from the query result.'}
-                            shown = ', '.join(_cell(cell) for cell in cells[:8]) or 'no numeric value'
-                            feedback = (f'Not accepted: your answer is not a value of the last result ({shown}). '
-                                        'Do the whole calculation in SQL, including percentages and differences, '
-                                        'then copy the result value exactly. A NULL or empty result is not 0.')
+                            else:
+                                ungrounded += 1
+                                if ungrounded > 1:
+                                    return {'type': 'abstain', 'reason': 'Answer is not a value from the query result.'}
+                                shown = ', '.join(_cell(cell) for cell in cells[:8]) or 'no numeric value'
+                                feedback = (f'Not accepted: your answer is not a value of the last result ({shown}). '
+                                            'Do the whole calculation in SQL, including percentages and differences, '
+                                            'then copy the result value exactly. A NULL or empty result is not 0.')
                 elif kind in ('sql', '') and body:
                     emit({'stage': 'sql', 'sql': body})
                     last_sql = body
                     try:
-                        feedback = 'Result:\n' + run_query(connection, body, allowed, cells)
+                        feedback = 'Result:\n' + run_query(connection, body, allowed, cells, percent_cells)
                         succeeded = True
+                        last_ok_sql = ' '.join(body.split())
                     except QueryRejected as error:
                         feedback = f'Query rejected: {error}'
                     except duckdb.Error as error:
                         feedback = f'Query error: {str(error)[:600]}'
+                    if held_answer is not None:
+                        feedback += ('\nYour reply also held a final answer. It was not read: answer in a separate reply, '
+                                     'after you have seen this result.')
                 else:
                     feedback = 'Reply with one ```sql block or one ```json block.'
                 emit({'stage': 'observation', 'text': feedback})

@@ -233,6 +233,6 @@ Percentages are computed in SQL and rounded half-up to two decimals. Each functi
 
 12 wrong and 8 abstained. Of the abstentions, 6 were the model's own choice after failed queries and 2 hit the step limit.
 
-- Most failures are question types with no rulebook-ready relation yet: share of revenue by product group, change against the previous period, morning and afternoon shift, top products, customers by number of orders, price-change effect. Section 3.11 adds functions for the first four; they have not been measured with the model yet.
+- Most failures are question types with no rulebook-ready relation yet: share of revenue by product group, change against the previous period, morning and afternoon shift, top products, customers by number of orders, price-change effect. Section 3.11 adds functions for the first four. Their measurement with the model, and the fixes that followed, are in [the date hints and answer checks record](../2026-11-09_date_hints_and_answer_checks/README.md).
 - A few are format slips, such as a correct percentage returned with type `number`.
 - The model is sensitive to prompt wording (section 2.10). Any prompt change needs both question sets re-measured.

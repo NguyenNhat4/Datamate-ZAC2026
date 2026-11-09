@@ -11,7 +11,8 @@ from tabular_agent.preparation.pipeline import (
     _documented_header, _inherit_group_values, _relation_base, _schema, _sequence_epoch)
 from tabular_agent.preparation.semantics import canonical_status, map_status_labels
 from tabular_agent.sql_agent import (
-    QueryRejected, asks_percent, check_query, date_block, date_phrases, grounded, normalize_answer)
+    QueryRejected, asks_percent, check_query, compares_periods, date_block, date_phrases, describe_schema, grounded,
+    normalize_answer, rescaled_percent)
 
 
 RULES = """
@@ -258,6 +259,22 @@ class BusinessViews(unittest.TestCase):
                                          f"FROM semantic.top_products({feb})").fetchall(),
                          [(1, "P1", "Trà", Decimal(3)), (2, "P2", "Trà sữa", Decimal(3)), (3, "P4", "Bánh", Decimal(1))])
 
+    def test_comparison_and_shift_patterns_follow_the_question(self):
+        schema = {"relations": self.period_shop().relations}
+        self.db.execute("SET search_path='semantic,clean'")
+        plain, _ = describe_schema(self.db, schema, "Cho tôi biết dthu tuần trước.")
+        self.assertNotIn("FROM semantic.period_comparison(", plain)
+        self.assertNotIn("FROM semantic.shift_summary(", plain)
+        compared, _ = describe_schema(self.db, schema, "So với tháng trước, doanh thu tháng 2/2025 tăng mấy %?")
+        self.assertIn("SELECT revenue_change_percent FROM semantic.period_comparison(", compared)
+        self.assertIn("SELECT orders_change_percent FROM semantic.period_comparison(", compared)
+        shifts, _ = describe_schema(self.db, schema, "tháng 2/2025 ca chiều có bao nhiêu đơn")
+        self.assertIn("SELECT orders FROM semantic.shift_summary(", shifts)
+        self.assertNotIn("FROM semantic.period_comparison(", shifts)
+        # Without a question every pattern the bundle supports is shown.
+        everything, _ = describe_schema(self.db, schema)
+        self.assertIn("FROM semantic.period_comparison(", everything)
+
     def test_period_functions_need_their_columns(self):
         self.table("items", "order_item", {"order_id": "VARCHAR", "order_date": "DATE", "status": "VARCHAR",
                                            "product_name": "VARCHAR", "line_amount": "DECIMAL(20,0)"},
@@ -375,10 +392,23 @@ class AnswerFormat(unittest.TestCase):
         self.assertEqual(date_phrases("Doanh thu là bao nhiêu?", "2025-07-25"), [])
 
     def test_named_months_and_quarters_get_explicit_ranges(self):
+        # A question that compares nothing gets only its own period.
         self.assertEqual(date_phrases("Doanh thu tháng 2/2024?", "2025-07-25"),
-                         ['- "thang 2 2024" means 2024-02-01 to 2024-02-29; the month before it is 2024-01-01 to 2024-01-31'])
+                         ['- "thang 2 2024" means 2024-02-01 to 2024-02-29'])
         self.assertEqual(date_phrases("bao nhieu don trong quy 3 nam 2025", "2026-09-14"),
+                         ['- "quy 3 nam 2025" means 2025-07-01 to 2025-09-30'])
+        self.assertEqual(date_phrases("dthu quý 3 năm 2025 tăng hay giảm bn % so với quý trước", "2026-09-14"),
                          ['- "quy 3 nam 2025" means 2025-07-01 to 2025-09-30; the quarter before it is 2025-04-01 to 2025-06-30'])
+        self.assertIn("the month before it is 2025-07-01 to 2025-07-31",
+                      date_phrases("thang 8/2025 dthu thay doi bao nhiu % so voi thang lien trc", "2026-08-19")[0])
+        # A question that names both periods brings its own base: no earlier range is added.
+        self.assertEqual(date_phrases("Doanh thu tháng 4 năm 2026 tăng trưởng bao nhiêu % so với tháng 4 năm 2025?", "2026-08-19"),
+                         ['- "thang 4 nam 2026" means 2026-04-01 to 2026-04-30', '- "thang 4 nam 2025" means 2025-04-01 to 2025-04-30'])
+        self.assertIn("the same month a year earlier is 2025-05-01 to 2025-05-31",
+                      date_phrases("doanh thu tháng 5/2026 so với cùng tháng năm trước tăng mấy %", "2026-08-19")[0])
+        # Comparing the shifts of one month is not a comparison with an earlier month.
+        self.assertEqual(date_phrases("tháng 12/2025 doanh thu ca chiều so với ca sáng chênh bao nhiêu %", "2026-06-02"),
+                         ['- "thang 12 2025" means 2025-12-01 to 2025-12-31'])
         # Without a year: this year's unless it starts after the reference date.
         self.assertIn("2025-02-01 to 2025-02-28", date_phrases("doanh thu tháng 2", "2026-01-15")[0])
         self.assertIn("2026-01-01 to 2026-01-31", date_phrases("doanh thu tháng 1", "2026-01-15")[0])
@@ -395,11 +425,32 @@ class AnswerFormat(unittest.TestCase):
         self.assertTrue(asks_percent("Tỉ lệ đơn huỷ tháng 1 là bao nhiêu?"))
         self.assertTrue(asks_percent("doanh thu tang hay giam may % so voi thang truoc"))
         self.assertFalse(asks_percent("tồn kho thuốc 10% chai 90ml còn bao nhiêu chai"))
+        self.assertTrue(asks_percent("nhóm gỏi đóng góp bao nhieeu % dthu"))
+        self.assertTrue(asks_percent("dthu hơn hay kém tháng trc bnhiu phần trawm"))
+        self.assertTrue(asks_percent("Trà vải chiếm bao nhiêu phaanf trăm doanh thu?"))
+        self.assertTrue(asks_percent("dthu tăng hay giảm maays %"))
+        self.assertFalse(asks_percent("Povidine 10 % chai 90ml còn bao nhiêu chai"))
         self.assertTrue(grounded(0.79, [0.79]))
         self.assertTrue(grounded(70712, [Decimal("70711.6")]))
         self.assertTrue(grounded(2.89, [2.8912]))
         self.assertFalse(grounded(79, [0.79]))
         self.assertFalse(grounded(0, []))
+
+    def test_comparisons_with_an_earlier_period(self):
+        for question in ("So với tháng trước đó, doanh thu tháng 11/2025 tăng hay giảm mấy phần trăm?",
+                         "thang 8/2025 dthu thay doi bao nhiu % so voi thang lien trc",
+                         "dthu tuần này so với tuần trước tăng bn %", "doanh thu tháng 5/2026 so cùng kỳ năm ngoái"):
+            self.assertTrue(compares_periods(question), question)
+        for question in ("Cho tôi biết dthu tuần trước.", "Số ly Cà phê muối bán được trong tháng 6/2025",
+                         "ca chiều so với ca sáng chênh bao nhiêu %", "tổng tiền giảm giá tháng 3/2026",
+                         "tỉ trọng của nhóm giảm đau hạ sốt trong dthu tháng 10/2025 là bao nhiêu %"):
+            self.assertFalse(compares_periods(question), question)
+
+    def test_a_percent_cell_multiplied_by_100_again_is_rescaled(self):
+        self.assertEqual(rescaled_percent(-35, [Decimal("-0.35")]), -0.35)
+        self.assertEqual(rescaled_percent(74, [Decimal("0.7412")]), 0.74)
+        self.assertIsNone(rescaled_percent(12, [Decimal("0.5")]))
+        self.assertIsNone(rescaled_percent(0, [Decimal("0")]))
 
     def test_several_numbers_are_a_list_and_a_table_needs_a_named_object(self):
         misplaced = {"type": "table", "columns": ["whole", "loose"], "rows": [[13, 2]]}

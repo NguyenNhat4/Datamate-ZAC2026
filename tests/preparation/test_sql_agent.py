@@ -150,6 +150,38 @@ class SqlAnswering(unittest.TestCase):
         self.assertEqual(answer, {"type": "number", "answer": 170})
         self.assertIn("name_like", model.feedback[1])
 
+    def test_a_reply_with_a_query_and_an_answer_runs_the_query(self):
+        both = sql("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines") + "\n" + final({"type": "number", "answer": 5})
+        answer, model = self.ask(both, final({"type": "number", "answer": 220}))
+        self.assertEqual(answer, {"type": "number", "answer": 220})
+        self.assertIn("220", model.feedback[1])
+        self.assertIn("also held a final answer", model.feedback[1])
+        # Repeating the query whose result was already seen, with an answer, is read as the answer.
+        query = sql("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines")
+        answer, model = self.ask(query, query + "\n" + final({"type": "number", "answer": 220}))
+        self.assertEqual(answer, {"type": "number", "answer": 220})
+        self.assertEqual(len(model.feedback), 2)
+
+    def test_a_percent_result_multiplied_by_100_again_is_rescaled(self):
+        self.question["question"] = "Trà vải chiếm bao nhiêu phần trăm doanh thu?"
+        answer, _ = self.ask(sql("SELECT ROUND(100.0 * 7 / 2000, 2) AS share FROM semantic.eligible_sales_lines LIMIT 1"),
+                             final({"type": "percent", "answer": 35}))
+        self.assertEqual(answer, {"type": "percent", "answer": 0.35})
+        # Without evidence that the cell is already a percentage, the answer is not changed.
+        answer, model = self.ask(sql("SELECT 7.0 / 2000 AS share FROM semantic.eligible_sales_lines LIMIT 1"),
+                                 final({"type": "percent", "answer": 35}), final({"type": "percent", "answer": 35}))
+        self.assertEqual(answer["type"], "abstain")
+
+    def test_a_percentage_is_refused_once_when_the_question_asks_for_an_amount(self):
+        rate = sql("SELECT ROUND(100.0 * 70 / 220, 2) AS change_percent FROM semantic.eligible_sales_lines LIMIT 1")
+        total = sql("SELECT SUM(line_amount) FROM semantic.eligible_sales_lines")
+        answer, model = self.ask(rate, final({"type": "percent", "answer": 31.82}), total, final({"type": "number", "answer": 220}))
+        self.assertEqual(answer, {"type": "number", "answer": 220})
+        self.assertIn("does not ask for a percentage", model.feedback[2])
+        # A second percent answer is accepted.
+        answer, _ = self.ask(rate, final({"type": "percent", "answer": 31.82}), final({"type": "percent", "answer": 31.82}))
+        self.assertEqual(answer, {"type": "percent", "answer": 31.82})
+
     def test_step_limit_ends_in_an_abstention(self):
         answer, _ = self.ask(*["no block here"] * 6)
         self.assertEqual(answer["type"], "abstain")
