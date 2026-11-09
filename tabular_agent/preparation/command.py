@@ -34,7 +34,7 @@ def run_preparation(args):
                 if args.command=='prepare':
                     result=prepare_business(root/name,split/'rulebook.md',split/'calendar.csv',
                                             output=output,config=config,spec=spec,proposal_adapter=adapter)
-                    summary=result.model_dump(mode='json')
+                    summary={'business':name,**result.model_dump(mode='json')}
                 else:
                     result=profile_business(root/name,split/'rulebook.md',split/'calendar.csv',
                                             config=config,spec=spec,proposal_adapter=adapter)

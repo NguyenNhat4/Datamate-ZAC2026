@@ -17,6 +17,7 @@ import time
 from .agent import answer_question, source_preview
 from .contracts import read_jsonl
 from .evaluate import score
+from .sql_agent import answer_question_sql, find_bundles
 from .model import create_model, create_openai_model, openai_model_name
 from .telemetry import tracing
 
@@ -97,6 +98,7 @@ def parser():
         command.add_argument('--partition', choices=['all', 'dev', 'validation', 'holdout'], default='all')
         command.add_argument('--partition-seed', type=int, default=42)
         command.add_argument('--sample', choices=['random', 'balanced'], default='random')
+        command.add_argument('--prepared', help='Directory of prepared bundles; answer with SQL over clean data instead of raw files')
         for flag in ('weight-sha256', 'gpu-layers', 'cache-type-k', 'cache-type-v'):
             command.add_argument('--' + flag)
     sub = commands.add_parser('score')
@@ -251,13 +253,15 @@ def run(args):
             dependencies[name] = None
     manifest = {'revision': revision, 'python': sys.version.split()[0], 'model': model_name if args.provider == 'openai' else local_name,
                 'dirty': dirty, 'dependencies': dependencies, 'provider': args.provider,
-                'base_url': base if args.provider == 'local' else None, 'agent_mode': 'single', 'seed': args.seed,
+                'base_url': base if args.provider == 'local' else None, 'agent_mode': 'sql' if args.prepared else 'single',
+                'prepared': args.prepared, 'seed': args.seed,
                 'partition': args.partition, 'partition_seed': args.partition_seed, 'sample': args.sample,
                 'max_steps': args.max_steps, 'max_tokens': args.max_tokens, 'question_timeout': args.question_timeout,
                 'weight_sha256': args.weight_sha256, 'gpu_layers': args.gpu_layers, 'context': args.context,
                 'cache_type_k': args.cache_type_k, 'cache_type_v': args.cache_type_v}
     (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     rulebook = (split / 'rulebook.md').read_text(encoding='utf-8')
+    bundles = find_bundles(args.prepared) if args.prepared else None
     predictions = []
     timings = []
     previews = {}
@@ -338,6 +342,13 @@ def run(args):
                 try:
                     budget = min(args.question_timeout, remaining, 60)
                     with time_limit(budget):
+                      if bundles is not None:
+                        if question['business_id'] not in bundles:
+                            answer = {'type': 'abstain', 'reason': 'No prepared data for this business.'}
+                        else:
+                            answer = answer_question_sql(model, question, business, bundles[question['business_id']],
+                                                         rulebook, max_steps=min(args.max_steps, 6), emit=emit)
+                      else:
                         preview_start = time.monotonic()
                         files = sorted(p for p in business.rglob('*') if p.is_file())
                         cache_key = (str(business), tuple((str(p.relative_to(business)), p.stat().st_size,
