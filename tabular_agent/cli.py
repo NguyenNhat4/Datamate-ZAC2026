@@ -103,6 +103,16 @@ def parser():
     for flag in ('questions', 'predictions', 'references'):
         sub.add_argument('--' + flag, required=True)
     sub.add_argument('--output')
+    for name in ('profile', 'prepare'):
+        command = commands.add_parser(name, help='Inspect/prepare all source data without reading questions or answers')
+        command.add_argument('--split', default='data/train')
+        command.add_argument('--business', help='Comma-separated business directories; omit for every business')
+        command.add_argument('--output', default='artifacts/prepared' if name == 'prepare' else None)
+        command.add_argument('--spec', help='Saved declarative specification, for a single business')
+        command.add_argument('--model', help='Optional already-served local model for ambiguous preparation decisions')
+        command.add_argument('--base-url', default='http://127.0.0.1:8000/v1')
+        command.add_argument('--deadline', type=float, default=600)
+        command.add_argument('--memory-limit', default='1GB')
     return parser
 
 
@@ -399,6 +409,9 @@ def main():
     """
     try:
         args = parser().parse_args()
+        if args.command in ('profile', 'prepare'):
+            from .preparation.command import run_preparation
+            return run_preparation(args)
         if args.command == 'score':
             result = score(read_jsonl(args.questions), read_jsonl(args.predictions), read_jsonl(args.references))
             text = json.dumps(result, ensure_ascii=False, indent=2)

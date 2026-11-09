@@ -8,7 +8,7 @@ SEED ?= 42
 OUT ?=
 ARGS ?=
 
-.PHONY: help setup ui serve-local telemetry bench bench-local demo predict doctor test test-sandbox check
+.PHONY: help setup ui serve-local telemetry bench bench-local demo predict doctor profile prepare test test-sandbox check
 help:
 	@echo 'make ui                           Open the local question picker and visual test results'
 	@echo 'make serve-local                  Start the local model server for the UI'
@@ -17,6 +17,8 @@ help:
 	@echo 'make bench-local LIMIT=5           Start the provisioned local model and benchmark'
 	@echo 'make bench                        Benchmark against an already running local server'
 	@echo 'make predict SPLIT=data/public_test  Predict without reading reference answers'
+	@echo 'make profile                      Fully inspect source data without questions or answers'
+	@echo 'make prepare                      Publish validated DuckDB data and schema bundles'
 	@echo 'make test                         Rewrite contract and scripted agent checks'
 	@echo 'make test-sandbox                 Also check the isolated worker with invented data'
 	@echo 'BASE_URL=http://127.0.0.1:8000/v1 MODEL=name OUT=runs/name ARGS="..."'
@@ -42,10 +44,16 @@ predict: setup
 	$(PYTHON) -m tabular_agent.cli predict --split "$(SPLIT)" --limit 0 --seed "$(SEED)" $(if $(OUT),--output "$(OUT)",) $(ARGS)
 doctor: setup
 	$(PYTHON) -m tabular_agent.cli doctor $(ARGS)
+profile: setup
+	$(PYTHON) -m tabular_agent.cli profile --split "$(SPLIT)" $(if $(OUT),--output "$(OUT)",) $(ARGS)
+prepare: setup
+	$(PYTHON) -m tabular_agent.cli prepare --split "$(SPLIT)" $(if $(OUT),--output "$(OUT)",) $(ARGS)
 test: setup
 	$(PYTHON) -m unittest discover -s tests/rewrite -v
+	$(PYTHON) -m unittest discover -s tests/preparation -v
 test-sandbox: setup
 	env RUN_SANDBOX_TESTS=1 $(PYTHON) -m unittest discover -s tests/rewrite -v
+	$(PYTHON) -m unittest discover -s tests/preparation -v
 check:
 	$(PYTHON) -m compileall -q tabular_agent tests streamlit_app.py
 	git diff --check

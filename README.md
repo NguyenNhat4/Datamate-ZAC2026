@@ -4,6 +4,10 @@ A single `smolagents.CodeAgent` answers Vietnamese tabular questions by writing 
 
 For the data contract, answer types and reference evaluation profile, see [project-overview.md](project-overview.md). The current split's `rulebook.md`, each business's `README.md`, and `as_of_date` are provided to the agent. Reference answers are read only after a benchmark's inference has finished.
 
+## Prepare clean data
+
+`make profile` fully inspects business sources; `make prepare` publishes validated DuckDB tables, private audit evidence, and a documented schema under ignored artifacts. Use `ARGS="--business directory_name"` for one business or omit it for the whole split. Preparation never reads questions or reference answers. The schema is intended for the separate SQL answering path; these commands do not change the current agent. See [data preparation](docs/data-preparation.md) for contracts, optional local-model assistance, reports, and quality limitations.
+
 ## Run questions in the UI
 
 1. Install the dependencies once:
