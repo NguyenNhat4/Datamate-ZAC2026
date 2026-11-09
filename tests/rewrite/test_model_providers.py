@@ -51,6 +51,23 @@ class ProviderTests(unittest.TestCase):
              patch('tabular_agent.model.dotenv_values', return_value={'OPENAI_MODEL': 'configured-model'}):
             self.assertEqual(openai_model_name(), 'configured-model')
 
+
+    def test_local_model_sends_seed_and_zero_temperature_by_default(self):
+        response = ChatCompletion.model_validate({
+            'id': 'synthetic', 'object': 'chat.completion', 'created': 0, 'model': 'fixture',
+            'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'ok'}}],
+            'usage': {'prompt_tokens': 3, 'completion_tokens': 1, 'total_tokens': 4},
+        })
+        for options, expected in (({}, 0.0), ({'temperature': 0.7}, 0.7)):
+            model = create_model('fixture', 'http://127.0.0.1:8000/v1', **options)
+            try:
+                with patch.object(model.client.chat.completions, 'create', return_value=response) as create:
+                    model.generate([{'role': 'user', 'content': 'synthetic'}])
+                self.assertEqual(create.call_args.kwargs['temperature'], expected)
+                self.assertEqual(create.call_args.kwargs['seed'], 42)
+            finally:
+                model.client.close()
+
     def test_openai_request_parameters_use_hosted_endpoint(self):
         response = ChatCompletion.model_validate({
             'id': 'synthetic', 'object': 'chat.completion', 'created': 0, 'model': 'fixture',

@@ -85,6 +85,8 @@ def parser():
         command.add_argument('--output')
         command.add_argument('--limit', type=int, default=20 if name == 'bench' else 0)
         command.add_argument('--seed', type=int, default=42)
+        command.add_argument('--temperature', type=float, default=0.0,
+                             help='Sampling temperature for the local server (default 0: repeatable runs)')
         command.add_argument('--business')
         command.add_argument('--question-id', action='append', default=[])
         command.add_argument('--max-steps', type=int, default=4)
@@ -208,6 +210,8 @@ def run(args):
     if any(not math.isfinite(x) or x <= 0 for x in (args.max_steps, args.max_tokens, args.exec_timeout,
                                                      args.question_timeout, args.model_timeout, args.run_timeout)) or args.limit < 0:
         raise ValueError('Timeouts and step/token limits must be positive; limit cannot be negative')
+    if not math.isfinite(args.temperature) or args.temperature < 0:
+        raise ValueError('Temperature must be zero or positive')
     if args.provider == 'openai':
         if args.base_url:
             raise ValueError('--base-url is for local servers; OpenAI uses https://api.openai.com/v1')
@@ -218,7 +222,8 @@ def run(args):
         local_name = args.model or os.getenv('MODEL')
         if not local_name:
             raise ValueError('Set --model to the local model server alias')
-        model = create_model(local_name, base, max_tokens=args.max_tokens, timeout=args.model_timeout, seed=args.seed)
+        model = create_model(local_name, base, max_tokens=args.max_tokens, timeout=args.model_timeout, seed=args.seed,
+                             temperature=args.temperature)
     if args.command == 'doctor':
         print('Configured provider:', 'OpenAI API' if args.provider == 'openai' else f'local ({base})')
         return 0
@@ -255,6 +260,7 @@ def run(args):
                 'dirty': dirty, 'dependencies': dependencies, 'provider': args.provider,
                 'base_url': base if args.provider == 'local' else None, 'agent_mode': 'sql' if args.prepared else 'single',
                 'prepared': args.prepared, 'seed': args.seed,
+                'temperature': args.temperature if args.provider == 'local' else None,
                 'partition': args.partition, 'partition_seed': args.partition_seed, 'sample': args.sample,
                 'max_steps': args.max_steps, 'max_tokens': args.max_tokens, 'question_timeout': args.question_timeout,
                 'weight_sha256': args.weight_sha256, 'gpu_layers': args.gpu_layers, 'context': args.context,

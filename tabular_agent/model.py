@@ -139,7 +139,7 @@ def openai_model_name():
     return _setting('OPENAI_MODEL') or DEFAULT_OPENAI_MODEL
 
 
-def create_model(model_id, base_url, *, max_tokens=2048, timeout=120, seed=42):
+def create_model(model_id, base_url, *, max_tokens=2048, timeout=120, seed=42, temperature=0.0):
     """Configure an OpenAI-compatible model client for a local HTTP endpoint.
 
     Args:
@@ -149,6 +149,9 @@ def create_model(model_id, base_url, *, max_tokens=2048, timeout=120, seed=42):
         max_tokens: Maximum output-token budget sent to the server.
         timeout: HTTP request timeout in seconds.
         seed: Seed passed to the server; determinism depends on that server.
+        temperature: Sampling temperature sent with every request. The default 0
+            asks for the most likely token, so runs compare code, not samples;
+            a server that ignores it keeps its own default.
 
     Returns:
         LocalModel with proxies, redirects and request retries disabled. No
@@ -181,7 +184,7 @@ def create_model(model_id, base_url, *, max_tokens=2048, timeout=120, seed=42):
     client = httpx.Client(timeout=timeout, trust_env=False, follow_redirects=False,
                           event_hooks={'response': [reject_redirect]})
     return LocalModel(model_id=model_id, api_base=base_url, api_key='local',
-                       max_tokens=max_tokens, seed=seed, retry=False,
+                       max_tokens=max_tokens, seed=seed, temperature=temperature, retry=False,
                        client_kwargs={'http_client': client, 'max_retries': 0})
 
 
