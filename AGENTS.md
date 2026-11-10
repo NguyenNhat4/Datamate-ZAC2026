@@ -49,3 +49,6 @@ When working against an evaluation profile, its current official requirements ta
 
 - Do not create commits, push to a remote, or submit an entry unless explicitly requested in the current task.
 - Reset commits only when explicitly requested. Preserve working files by default; do not use a hard reset, delete work, or force-push without explicit authorization for those actions.
+
+## Records
+- Whatever task you done if having record on decisions and progresses would help future session start smoothly, create that like docs/fix. 

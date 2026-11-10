@@ -7,11 +7,16 @@ LIMIT ?= 20
 SEED ?= 42
 OUT ?=
 ARGS ?=
+# Same server and answering settings as the frozen-set benchmark runs
+# (docs/fix/2026-11-10_rankings_and_patterns): port 18234, SQL over prepared bundles.
+LOCAL_PORT ?= 18234
+export LOCAL_PORT
+PREPARED ?= artifacts/prepared-r2-dev artifacts/prepared-r2-unseen artifacts/prepared-r2-public
 
-.PHONY: help setup ui serve-local telemetry bench bench-local demo predict doctor profile prepare test test-sandbox check
+.PHONY: help setup ui serve serve-local telemetry bench bench-local demo predict doctor profile prepare test test-sandbox check
 help:
 	@echo 'make ui                           Open the local question picker and visual test results'
-	@echo 'make serve-local                  Start the local model server for the UI'
+	@echo 'make serve                        Start the local model server (benchmark settings, port 18234)'
 	@echo 'make telemetry                    Start local Phoenix for agent trace inspection'
 	@echo 'make demo                         Run the new agent on invented cross-month sales data'
 	@echo 'make bench-local LIMIT=5           Start the provisioned local model and benchmark'
@@ -28,8 +33,9 @@ help:
 	@touch $@
 setup: .venv-native/.ready
 ui: setup
+	env UI_BASE_URL=http://127.0.0.1:$(LOCAL_PORT)/v1 UI_PREPARED="$(PREPARED)" \
 	$(PYTHON) -m streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true --browser.gatherUsageStats false
-serve-local:
+serve serve-local:
 	./scripts/serve-local.sh
 telemetry: setup
 	mkdir -p .cache/phoenix

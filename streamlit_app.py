@@ -1,6 +1,7 @@
 """Local interface for running and inspecting tabular-agent questions."""
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,33 @@ import httpx
 import streamlit as st
 from tabular_agent.contracts import read_jsonl
 from tabular_agent.model import create_model, openai_api_key, openai_model_name
+from tabular_agent.sql_agent import find_bundles
+
+# Answering settings of the frozen-set benchmark runs (temperature 0, up to six SQL steps).
+BENCH_ARGS = ['--temperature', '0', '--max-steps', '6', '--seed', '42']
+DEFAULT_BASE_URL = os.getenv('UI_BASE_URL', 'http://127.0.0.1:18234/v1')
+PREPARED_ROOTS = os.getenv('UI_PREPARED', 'artifacts/prepared-r2-dev artifacts/prepared-r2-unseen '
+                                          'artifacts/prepared-r2-public').split()
+
+
+@st.cache_data
+def prepared_root_for(business_id):
+    """Return the first prepared-bundle directory that holds a business, or None.
+
+    Args:
+        business_id: Business identifier, used only to route to its data.
+
+    Returns:
+        Directory string from ``PREPARED_ROOTS``; None if no directory has a
+        bundle for the business. Missing or empty directories are skipped.
+    """
+    for root in PREPARED_ROOTS:
+        try:
+            if business_id in find_bundles(root):
+                return root
+        except (OSError, ValueError):
+            continue
+    return None
 
 st.set_page_config(page_title='Agent test lab', page_icon='🔎', layout='wide')
 st.title('Agent test lab')
@@ -26,7 +54,7 @@ if provider == 'OpenAI API':
         st.warning('Set OPENAI_API_KEY in your environment or local .env file before running.')
 else:
     model = st.text_input('Local model name', value='local-coder-7b')
-    base_url = st.text_input('Local model endpoint', value='http://127.0.0.1:8000/v1')
+    base_url = st.text_input('Local model endpoint', value=DEFAULT_BASE_URL)
     st.caption('Start an OpenAI-compatible local model server separately and keep it running. The UI does not start it.')
     if st.button('Check local connection'):
         try:
@@ -63,13 +91,21 @@ if not businesses:
     st.stop()
 
 business = st.selectbox('Business', businesses)
+use_sql = st.checkbox('Answer with SQL over prepared bundles (benchmark settings)', value=True,
+                      help='Same answering mode as the frozen-set runs: temperature 0, up to six steps.')
+prepared = prepared_root_for(business) if use_sql else None
+if use_sql:
+    if prepared:
+        st.caption(f'Prepared bundles: {prepared} · temperature 0 · max 6 steps')
+    else:
+        st.warning(f'No prepared bundle for {business} in: {", ".join(PREPARED_ROOTS)}. Run make prepare first.')
 business_questions = {q['id']: q for q in questions if q.get('business_id') == business}
 chosen = st.multiselect(
     'Questions', list(business_questions),
     format_func=lambda key: f"{key} — {business_questions[key]['question']}",
     key=f'questions:{Path(split).resolve()}:{business}',
 )
-if st.button('Run selected questions', disabled=not chosen):
+if st.button('Run selected questions', disabled=not chosen or (use_sql and not prepared)):
     root = Path('runs') / ('ui-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
     command = [sys.executable, '-m', 'tabular_agent.cli',
                'bench' if (Path(split) / 'answers.jsonl').is_file() else 'predict',
@@ -77,6 +113,8 @@ if st.button('Run selected questions', disabled=not chosen):
                '--provider', 'openai' if provider == 'OpenAI API' else 'local', '--model', model]
     if base_url:
         command.extend(['--base-url', base_url])
+    if use_sql:
+        command.extend(['--prepared', prepared, *BENCH_ARGS])
     for question_id in chosen:
         command.extend(['--question-id', question_id])
     if telemetry:
@@ -145,7 +183,9 @@ def show_run():
                     if not line.endswith('\n'):
                         break
                     item = json.loads(line)
-                    if item.get('stage') == 'code':
+                    if item.get('stage') == 'sql':
+                        st.code(item['sql'], language='sql')
+                    elif item.get('stage') == 'code':
                         st.code(item['code'], language='python')
                     elif item.get('stage') == 'memory_step':
                         st.markdown(f"**Agent · step {item['step']}**")
