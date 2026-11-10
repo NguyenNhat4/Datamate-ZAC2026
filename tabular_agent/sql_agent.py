@@ -116,7 +116,7 @@ PATTERNS = (
      "AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' GROUP BY customer_key "
      "ORDER BY SUM(revenue) DESC, customer_key LIMIT 3", 'customers'),
     ('semantic.eligible_orders', ('order_date', 'customer_key', 'customer_name'),
-     'Customer with the most orders (nhiều đơn nhất), answer type string',
+     'Customer with the most orders (use SUM(revenue) for the customer who bought the most money), answer type string',
      "SELECT MIN(customer_name) FROM semantic.eligible_orders WHERE customer_key IS NOT NULL "
      "AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' GROUP BY customer_key ORDER BY COUNT(*) DESC, customer_key LIMIT 1"),
     ('semantic.orders', ('order_date', 'order_state'),
