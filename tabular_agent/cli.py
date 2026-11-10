@@ -144,6 +144,9 @@ def parser():
         command.add_argument('--no-intents', action='store_true',
                              help='Ask the model every question; by default recurring question kinds are answered by '
                                   'fixed queries (tabular_agent/intents)')
+        command.add_argument('--intents-only', action='store_true',
+                             help='Answer only the questions the fixed kinds claim and abstain on the rest, without '
+                                  'asking the model: every answer comes from a reviewed query')
         command.add_argument('--telemetry', action='store_true', help='Send traces to local Phoenix on port 6006')
         command.add_argument('--run-timeout', type=float, default=21600)
         command.add_argument('--context', type=int, default=16384)
@@ -265,6 +268,8 @@ def run(args):
         raise ValueError('Timeouts and step/token limits must be positive; limit cannot be negative')
     if not math.isfinite(args.temperature) or args.temperature < 0:
         raise ValueError('Temperature must be zero or positive')
+    if args.no_intents and args.intents_only:
+        raise ValueError('--no-intents and --intents-only exclude each other')
     if args.provider == 'openai':
         if args.base_url:
             raise ValueError('--base-url is for local servers; OpenAI uses https://api.openai.com/v1')
@@ -312,7 +317,7 @@ def run(args):
     manifest = {'revision': revision, 'python': sys.version.split()[0], 'model': model_name if args.provider == 'openai' else local_name,
                 'dirty': dirty, 'dependencies': dependencies, 'provider': args.provider,
                 'base_url': base if args.provider == 'local' else None, 'agent_mode': 'sql',
-                'prepared': args.prepared, 'intents': not args.no_intents, 'seed': args.seed,
+                'prepared': args.prepared, 'intents': not args.no_intents, 'intents_only': args.intents_only, 'seed': args.seed,
                 'temperature': args.temperature if args.provider == 'local' else None,
                 'partition': args.partition, 'partition_seed': args.partition_seed, 'sample': args.sample,
                 'max_steps': args.max_steps, 'max_tokens': args.max_tokens, 'question_timeout': args.question_timeout,
@@ -389,7 +394,9 @@ def run(args):
                             answer = {'type': 'abstain', 'reason': 'No prepared data for this business.'}
                         else:
                             answer = None if args.no_intents else answer_by_intent(catalogs, bundles, question, emit)
-                            if answer is None:
+                            if answer is None and args.intents_only:
+                                answer = {'type': 'abstain', 'reason': 'No fixed question kind answers this question (intents-only run).'}
+                            elif answer is None:
                                 answer = answer_question_sql(model, question, business, bundles[question['business_id']],
                                                              rulebook, max_steps=min(args.max_steps, 6), emit=emit)
                 except QuestionDeadlineExceeded:
