@@ -49,6 +49,22 @@ make predict SPLIT=data/public_test ARGS="--model your-model --base-url http://1
 make bench SPLIT=data/train LIMIT=5 ARGS="--model your-model --base-url http://127.0.0.1:8000/v1"
 ```
 
+### Submission entrypoint
+
+`predict.sh` runs the system the benchmarks measure, end to end:
+
+1. It starts the local model server with the benchmark settings (`scripts/serve-local.sh`, port `LOCAL_PORT`, default 18234).
+2. While the model loads, it prepares every business in `DATA_DIR` (default `/data`, only read) into DuckDB bundles under `WORK_DIR` (default a new folder under `/tmp`).
+3. It answers every question with SQL over those bundles, at temperature 0 with at most six steps.
+
+Answers go to `RESULT_DIR/submission.jsonl` (default `/result`); `RESULT_DIR` must be empty or absent. Logs go to `RESULT_DIR/logs/`: one file per question, whose last event holds the id, final answer and elapsed seconds, plus `pipeline.log` (phase times) and `prepare.log`.
+
+The whole run is kept within `RUN_SECONDS` (default 21,600, the reference profile's six hours, including preparation and model loading). Answering stops `STOP_MARGIN_SECONDS` (default 300) before that, keeping every answer already written. A business that preparation blocks gets `abstain` for its questions. Set `BASE_URL` (and `MODEL`) to use an already running server instead of starting one. The server binary, device (`LOCAL_DEVICE`, default `Vulkan1`) and weights are those of this machine; a container for other hardware must provide its own.
+
+```bash
+DATA_DIR=data/public_test RESULT_DIR=runs/public-dry WORK_DIR=$PWD/artifacts/prepared-dry ./predict.sh
+```
+
 ## Switch to the OpenAI API
 
 Add `OPENAI_API_KEY` to the Git-ignored `.env` file, or set it in your environment. Do not put the key in commands, logs, or chat. The environment variable takes precedence. The optional `OPENAI_MODEL` setting selects the default API model; otherwise the default is `gpt-6-luna`.

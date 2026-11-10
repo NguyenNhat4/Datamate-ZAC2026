@@ -379,7 +379,8 @@ def run(args):
                 measurements.update({'id': question['id'], 'seconds': time.monotonic() - started,
                                      'answer_type': answer['type']})
                 timings.append(measurements)
-                emit({'stage': 'question_timing', **measurements})
+                # The log contract asks for the id, final answer and elapsed time of every question.
+                emit({'stage': 'question_timing', **measurements, 'answer': answer})
             row = {'id': question['id'], **answer}
             predictions.append(row)
             submission.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + '\n')
