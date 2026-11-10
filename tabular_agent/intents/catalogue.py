@@ -6,6 +6,7 @@ applies the rulebook once, here, so a recognised question gets the same answer e
 """
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Callable
@@ -76,15 +77,18 @@ def intent(name, words, need, periods=(1, 1), numbers=(0, 0), entities=(), optio
 
 
 # Words that only occur inside the joined phrases of text._PHRASES; known so that typing variants of them are repaired.
-PHRASE_PARTS = frozenset('dien thoai tai quay zalo oa tien mat chuyen khoan vi tu xuat hien it lan luot ca sang chieu trung binh phan tram tro len trung thanh doi y ua chuong dat khach cao diem'.split())
+# "zalo oa" is a sales channel that appears in the businesses' data.
+PHRASE_PARTS = frozenset('''dien thoai tai quay zalo oa tien mat chuyen khoan vi tu xuat hien it lan luot ca sang chieu
+trung binh phan tram tro len thanh doi y ua chuong dat khach cao diem'''.split())
 
 
+@lru_cache(maxsize=1)
 def known_words():
-    """Every canonical word the registered intents or the period patterns use."""
+    """Every canonical word the registered intents or the period patterns use (computed once, after registration)."""
     out = set(FILLER) | set(COMMON) | set(P.WORDS) | PHRASE_PARTS
     for item in INTENTS:
         out |= item.words
-    return out
+    return frozenset(out)
 
 
 def analyze(question, as_of_date, catalog=None):
@@ -443,7 +447,7 @@ def operator(words):
 
 
 _THRESHOLD_WORDS = 'dem so ma ca tu trolen troxuong dong gte lte gt lt tren duoi vuot dat itnhat hon qua toida co la'
-_OPERATORS = {'>=': '>=', '>': '>', '<': '<', '<=': '<='}
+_OPERATORS = {'>=': '>=', '>': '>', '<': '<', '<=': '<='}  # a whitelist: an operator is never taken from the text
 
 
 @intent('days_over_amount', _THRESHOLD_WORDS + ' doanhthu ban duoc cuahang', lambda w, p: 'ngay' in w and bool({'doanhthu', 'ban'} & w)
@@ -454,6 +458,8 @@ def run_days_over(ctx, parsed):
         return None
     if ctx.outside(period.first, period.last):
         return unanswerable(NO_DATA)
+    # Only days inside the sales dates count: a period partly outside them is computed on the part that has data.
+    period = P.Period(period.kind, max(period.first, ctx.coverage[0]), min(period.last, ctx.coverage[1]))
     sql = ('SELECT COUNT(*) FROM (SELECT CAST(d AS DATE) AS day FROM generate_series(?::DATE, ?::DATE, INTERVAL 1 DAY) t(d)) '
            f'LEFT JOIN (SELECT CAST(order_date AS DATE) AS day, SUM({source[1]}) AS total FROM {source[0]} '
            'GROUP BY 1) USING (day) '
