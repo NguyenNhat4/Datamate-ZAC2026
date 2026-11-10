@@ -73,6 +73,7 @@ The frozen ids are in [question_sets.json](2026-11-10_unseen_businesses/question
 | 10 Nov | [Businesses the system was not tuned on](2026-11-10_unseen_businesses/README.md), with [PROGRESS](2026-11-10_unseen_businesses/PROGRESS.md) | Measurement basis (temperature 0, fresh server, pinned worktree); the frozen sets and holdout48; refusing sales tables that are not rulebook-ready; preparation fixes A to D | `82ebdb6`, `67d4d2c`, `2eef9af`, `f746981` | Done |
 | 10 Nov | [Rankings, ties and query patterns](2026-11-10_rankings_and_patterns/README.md), with [PROGRESS](2026-11-10_rankings_and_patterns/PROGRESS.md) | One DuckDB thread; customers by money; days over an amount; unsold products; byte-identical prompts for other kinds | `c509cba`, `a77671d`, `5e1507b` | Done |
 | 10 Nov | [Workflow review](2026-11-10_workflow_gaps/README.md) | What the workflow lacks for the 100-question goal; proposed samples and additions | none | Review; additions proposed |
+| 10 Nov | [Submission entrypoint](2026-11-10_submission_entrypoint/README.md) | `predict.sh` prepares the data at run time and answers with SQL and the benchmark settings, within the 6-hour budget; each question's log holds its final answer | `506d567` | Code done and checked; the full public dry run is still to do (runbook section 11) |
 
 ## Terms
 
@@ -95,7 +96,7 @@ Gathered on 10 November from the four records with plans. "Affects" gives the qu
 | B3 | dev_007's status column "Tiến độ" is parsed as money | dev_007, 60 public | Unseen 5.5 |
 | B4 | Shops with invoice headers only: questions that need sales lines still abstain (order revenue is done) | biz_110 (40 training), dev_009 (21 public) | Unseen 4 (Later 4) |
 | B5 | A price-only view for sales lines that are not rulebook-ready, so that price-on-a-date questions need not abstain | not counted | Unseen 4, 5.4 |
-| B6 | The submission entrypoint and a full public dry run | all public | Workflow review 3.1 |
+| B6 | The submission entrypoint and a full public dry run. The entrypoint is done (`506d567`). The dry run is to do: a first attempt stopped after 49 questions; see [the entrypoint record](2026-11-10_submission_entrypoint/README.md) | all public | Workflow review 3.1 |
 
 ### Answering
 

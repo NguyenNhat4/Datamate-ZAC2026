@@ -12,7 +12,7 @@ What was tested on 10 November:
 - **Set selection.** The id list and flags of section 4 select all 10 sample10 questions, with 6 steps and temperature 0.
 - **Reading results.** The outcome comparison (section 5) and the totals-only report (section 6), on existing runs.
 
-**Not run in this form:** the model server and `bench-local.sh` (section 4). On first use, run sample10 at `5e1507b` and compare it with `runs/sample10-r2s2b` (section 5): every outcome should be the same.
+- **A full set.** sample10 was run with section 4's commands at `506d567`, whose answering code is unchanged since `5e1507b`. Every model reply matched `runs/sample10-r2s2b`, at all 21 steps.
 
 Why each condition exists is explained in the [unseen businesses record](2026-11-10_unseen_businesses/README.md), decisions 5.1 and 5.3, and in the [rankings record](2026-11-10_rankings_and_patterns/README.md), decision 3.1. Start from [the index](README.md).
 
@@ -209,6 +209,7 @@ Each run folder is named `<set>-<tag>`. Only the manifest links a tag to its cod
 | `r2s1` | `c509cba` | `prepared-step2-dev` / `prepared-step2-unseen` | rankings record 4 |
 | `r2s2` | `a77671d` | `prepared-r2-dev` / `prepared-r2-unseen` | rankings record 4 |
 | `r2s2b` | `5e1507b` | `prepared-r2-dev` / `prepared-r2-unseen` | rankings record 4 |
+| `e1` | `506d567` | `prepared-r2-dev` (sample10 only). The public dry run `public-dry-e1` was stopped after 49 questions; its run-time bundles are in `artifacts/prepared-dry-e1/prepared` | [entrypoint record](2026-11-10_submission_entrypoint/README.md) |
 
 Older runs (`fix2` to `fix7`, `step1*`, `v2`, `baseline`, `check-*`) ran at the server's default temperature (0.8) on trees with uncommitted changes. Their manifests name the base commit only.
 
@@ -222,3 +223,32 @@ Older runs (`fix2` to `fix7`, `step1*`, `v2`, `baseline`, `check-*`) ran at the 
 6. **Older commits.** Commits before `82ebdb6` send no temperature, and commits before `c509cba` order tied rows arbitrarily. Neither repeats exactly.
 7. **Question order.** Selected questions run in file order, not in the order of the ids given. The order is still fixed, so runs repeat.
 8. **Prompt-size failures.** A question over the 16,384-token context fails at the server and is recorded as an abstention. In dev_006 this already happens to 12 public questions.
+9. **Preparation output paths.** Preparation refuses an output path that passes through a symbolic link. In a worktree, write bundles under the main folder's `artifacts`, not under the worktree's linked `artifacts`.
+
+## 11. Public-test dry run through the entrypoint
+
+`predict.sh` is what the organizers run. It starts its own server, prepares the split, answers with the settings of section 1, and stops the server; see [the entrypoint record](2026-11-10_submission_entrypoint/README.md). From the pinned worktree:
+
+```bash
+cd "$T"
+TAG=e1b                   # a name whose run and work folders do not exist yet
+nohup env DATA_DIR="$MAIN/data/public_test" RESULT_DIR="$MAIN/runs/public-dry-$TAG" \
+  WORK_DIR="$MAIN/artifacts/prepared-dry-$TAG" ./predict.sh > "$MAIN/runs/.public-dry-$TAG.stdout" 2>&1 &
+```
+
+- **Ports.** Port 18234 must be free: stop `make serve` first. `predict.sh` refuses an occupied port.
+- **Progress.**
+  - Phase times: `cat "$MAIN/artifacts/prepared-dry-$TAG/pipeline.log"`.
+  - Questions answered so far: `wc -l < "$MAIN/runs/public-dry-$TAG/submission.jsonl"`.
+- **Stopping early.** Stop the answering process by its PID, which `pgrep -af 'tabular_agent.cli predict'` lists. `predict.sh` then stops the server itself.
+- **Cost.** About 6.5 minutes of preparation, then answering. The answering time is an estimate from the sets' medians (about two hours); it has not been measured yet.
+- **Work folder.** Reusing a work folder reuses its bundles, so the preparation time is not measured.
+- **What to read.** Read the run as counts only:
+
+  ```bash
+  .venv-native/bin/python scripts/dry-run-report.py "runs/public-dry-$TAG" "artifacts/prepared-dry-$TAG" artifacts/prepared-r2-public
+  ```
+
+  This prints answered and abstained per business, abstention reasons, errors, timing, and whether the run-time bundles match the last prepared public bundles. It never prints question text or answer values.
+- **What not to read.** Do not read public questions or answers to choose fixes; the public test is not a development set.
+- **Uploading.** The run's `submission.jsonl` is in the upload format. Uploading it is a team decision. Record each upload in the index's upload log.
