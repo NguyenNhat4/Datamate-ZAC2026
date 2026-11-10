@@ -50,7 +50,7 @@ def main():
             if hit is None:
                 unclaimed.append(q)
                 continue
-            result, name = hit
+            result, name, _ = hit
             ok = match(validate_answer(result), references[q['id']])
             stats[name][0 if ok else 1] += 1
             results[q['id']] = {'intent': name, 'ok': ok}

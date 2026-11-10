@@ -152,6 +152,7 @@ class WithTheModelPath(unittest.TestCase):
                 self.assertEqual(reply['type'], 'abstain')
             self.assertEqual([e['stage'] for e in events], ['intent', 'intent'])
             self.assertEqual(events[0]['intent'], 'revenue')
+            self.assertEqual(events[0]['spec']['periods'], [['2026-03-01', '2026-03-31']])
             self.assertEqual(len(opened), 4)
             self.assertTrue(all(c.closed for c in opened), 'an intent attempt left the bundle open')
 

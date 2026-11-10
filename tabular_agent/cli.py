@@ -90,7 +90,7 @@ def answer_by_intent(catalogs, bundles, question, emit):
         catalogs[business] = context.catalog
         if hit is None:
             return None
-        result, name = hit
+        result, name, spec = hit
         answer = validate_answer(result)
     except Exception as error:
         emit({'stage': 'intent_error', 'error': f'{type(error).__name__}: {error}'})
@@ -98,7 +98,7 @@ def answer_by_intent(catalogs, bundles, question, emit):
     finally:
         if context is not None:
             context.close()
-    emit({'stage': 'intent', 'intent': name, 'answer': answer})
+    emit({'stage': 'intent', 'intent': name, 'spec': spec, 'answer': answer})
     return answer
 
 

@@ -1071,12 +1071,20 @@ def has_toppings_in_names(ctx):
     return ctx.toppings_in_names
 
 
+def _spec(parsed):
+    """What the intent understood, for the log: the periods, names and numbers it used."""
+    return {'periods': [[p.first.isoformat(), p.last.isoformat()] for p in parsed.periods],
+            'entities': [[e.kind, e.name] for e in parsed.entities or []],
+            'numbers': [str(n) for n in parsed.numbers]}
+
+
 def answer(question, as_of_date, ctx):
     """Answer a question by the first intent that explains it.
 
     Returns:
-        (answer dict, intent name) or None when no intent claims the question or the claimed intent cannot answer it
-        from this bundle. None means: leave the question to the model.
+        (answer dict, intent name, spec) or None when no intent claims the question or the claimed intent cannot
+        answer it from this bundle. The spec lists the periods (ISO first and last day), names and numbers the intent
+        read from the question, so that a log shows what was understood. None means: leave the question to the model.
     """
     if not hasattr(ctx, 'catalog'):
         ctx.catalog = Catalog(ctx)
@@ -1107,5 +1115,5 @@ def answer(question, as_of_date, ctx):
             continue
         result = item.run(ctx, parsed)
         if result is not None:
-            return result, item.name
+            return result, item.name, _spec(parsed)
     return None
