@@ -1,6 +1,20 @@
 # What happens to one question
 
-`answer_question_sql` in `sql_agent.py` answers one question over one bundle. The runner gives it at most six steps (model calls) and 60 seconds.
+The runner first lets the fixed question kinds try the question (`answer_by_intent` in `cli.py`, kinds in `tabular_agent/intents/`). The attempt opens the bundle, closes it again, and either returns a typed answer without any model call or returns nothing. Only then does `answer_question_sql` in `sql_agent.py` answer over the same bundle. The runner gives the model path at most six steps (model calls) and 60 seconds.
+
+```mermaid
+flowchart TD
+    Q[Question, as_of_date] --> B{Bundle for this business?}
+    B -- no --> X[abstain]
+    B -- yes --> N[Normalise: accents, abbreviations, typing residue; find periods, numbers, product / group / unit / customer names]
+    N --> E{Every word explained by one intent's vocabulary?}
+    E -- yes --> F[Fixed query over the semantic relations] --> OK{Can the bundle answer it?}
+    OK -- yes --> A[Typed answer, logged as an intent event]
+    OK -- no --> M
+    E -- no --> M[Model path: SQL answering, below]
+```
+
+Recognition is deliberately strict. A word that no intent explains (a qualifier such as "trừ voucher", a name the bundle does not hold) sends the question to the model, because a wrong answer costs more than the model's attempt. An intent answers `unanswerable` only when the asked period lies outside the sales dates, or when the bundle has rulebook-ready orders and nothing in its sources looks like the channel, payment method or customer the question needs.
 
 ```mermaid
 sequenceDiagram

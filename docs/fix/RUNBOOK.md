@@ -253,3 +253,27 @@ nohup env DATA_DIR="$MAIN/data/public_test" RESULT_DIR="$MAIN/runs/public-dry-$T
   This prints answered and abstained per business, abstention reasons, errors, timing, and whether the run-time bundles match the last prepared public bundles. It never prints question text or answer values.
 - **What not to read.** Do not read public questions or answers to choose fixes; the public test is not a development set.
 - **Uploading.** The run's `submission.jsonl` is in the upload format. Uploading it is a team decision. Record each upload in the index's upload log.
+
+## 12. Checks that need bundles but no model
+
+Since 11 November the runner answers recurring question kinds with fixed queries before it asks the model ([intent record](2026-11-11_intent_layer/README.md)). These three scripts check that layer and the bundles without a server. All three print counts and findings about bundles; none prints a reference answer or, for the public split, a question.
+
+```bash
+# 1. The kinds against the open training questions and their references.
+.venv-native/bin/python scripts/oracle-replay.py --prepared artifacts/prepared-r4-train
+#    --show N prints N wrong claims per kind (question, our answer, reference); --unclaimed N prints N unclaimed
+#    questions; --business biz_104 limits it to one business. gate100 and holdout48 are never loaded.
+
+# 2. Consistency of a bundle folder: line revenue equals order revenue month by month, states agree with
+#    counts_as_sale, no missing sales dates, no month without sales.
+.venv-native/bin/python scripts/bundle-invariants.py artifacts/prepared-r4-public
+
+# 3. How many questions of a split the kinds claim, per business (no answers read, no text printed).
+.venv-native/bin/python scripts/claim-coverage.py --split data/public_test --prepared artifacts/prepared-r4-public
+```
+
+- **Reading the replay.** "Wrong" must be 0. A wrong claim is either a parser error (the question is not of that kind), a query that applies the rulebook wrongly, or a bundle defect; the 11 November replay found one of each of the last two (the cash-on-delivery label "Thu hộ (COD)", record 3.6). Fix the cause; do not add a refusal for the one question.
+- **Reading the coverage.** It is a count of recognised questions, not a score. On training it is the share the kinds explain; on the public split it shows how far the public questions are from the training templates. Do not print or read public questions to raise it (section 11, "What not to read").
+- **Model-only runs.** `cli bench` and `cli predict` accept `--no-intents`. A set run with the kinds on mostly measures the kinds; the manifest's `intents` field says which it was. Report the model-only result next to it when the model is what you are judging.
+- **Opening a bundle twice.** DuckDB shares one locked database instance per file within a process. Code that opens a bundle for the kinds must close it before the model path opens it (`answer_by_intent` does, and `tests/answering/test_intents.py` checks it). A set that ran with the bundle left open abstained on every question that reached the model, with `InvalidInputException` in the abstention reason.
+

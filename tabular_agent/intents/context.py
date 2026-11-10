@@ -1,5 +1,4 @@
 """Read-only access to one prepared bundle for the fixed queries of the intent layer."""
-from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 import json
 from pathlib import Path

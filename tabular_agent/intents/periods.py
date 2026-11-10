@@ -55,6 +55,12 @@ def previous_month(day):
     return month_range(last.year, last.month)
 
 
+def month_at(day, offset):
+    """First and last day of the calendar month `offset` months after the one containing `day` (negative: before)."""
+    moved = shift_months(day.replace(day=1), offset)
+    return month_range(moved.year, moved.month)
+
+
 def shift_months(day, count):
     """The same day number `count` months away, capped at that month's last day."""
     index = day.year * 12 + day.month - 1 + count
@@ -211,6 +217,6 @@ def base_of(asked, today, year_ago=False):
         return Period('month_to_date', first, shift_months(asked.last, -1))
     if asked.kind == 'quarter':
         first = shift_months(asked.first, -3)
-        return Period('quarter', first, month_range(*divmod(first.year * 12 + first.month + 1, 12)[:1] +
-                                                    (divmod(first.year * 12 + first.month + 1, 12)[1] + 1,))[1])
+        last_month = shift_months(first, 2)
+        return Period('quarter', first, month_range(last_month.year, last_month.month)[1])
     return None

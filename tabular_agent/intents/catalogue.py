@@ -17,7 +17,6 @@ from .text import FILLER, canonical_tokens, prepare
 
 COMMON = frozenset('trong ngay rieng tinh xet theo vao luc tai da co'.split())
 SLOTS = frozenset({'@t', '@n'})
-ENTITY_SLOTS = {'product': '@p', 'group': '@g', 'unit': '@u', 'size': '@z'}
 _NUMBER = re.compile(r'^(\d{1,3}(?:\.\d{3})+|\d+)d?$')
 
 
@@ -167,10 +166,6 @@ def _one_period(parsed):
     return parsed.periods[0]
 
 
-def _is_period(word):
-    return word == '@t'
-
-
 # ---- intents -------------------------------------------------------------------------------------------------------
 
 @intent('revenue', 'doanhthu tong cong ban duoc tien thu ve ra hang nam nay',
@@ -313,16 +308,13 @@ def month_list(parsed):
     words = parsed.words
     if len(months) == 1 and 'ketthuc' in words and len(parsed.numbers) == 1 and 2 <= parsed.numbers[0] <= 12:
         last = months[0].first
-        return [P.month_range(*divmod(last.year * 12 + last.month - 1 - i, 12)[:1] +
-                              (divmod(last.year * 12 + last.month - 1 - i, 12)[1] + 1,))
-                for i in range(int(parsed.numbers[0]) - 1, -1, -1)]
+        return [P.month_at(last, -i) for i in range(int(parsed.numbers[0]) - 1, -1, -1)]
     if len(months) == 2 and 'tu' in words and bool({'den', 'toi'} & set(words)) and 'ketthuc' not in words and 'qua' not in words:
         a, b = months[0].first, months[1].first
         if a >= b:
             return None
         span = (b.year - a.year) * 12 + b.month - a.month
-        return [P.month_range(*divmod(a.year * 12 + a.month - 1 + i, 12)[:1] + (divmod(a.year * 12 + a.month - 1 + i, 12)[1] + 1,))
-                for i in range(span + 1)]
+        return [P.month_at(a, i) for i in range(span + 1)]
     unique = list(dict.fromkeys((m.first, m.last) for m in months))
     if len(unique) >= 2 and 'ketthuc' not in words and len(parsed.numbers) <= 1:
         if parsed.numbers and parsed.numbers[0] != len(unique):
@@ -931,8 +923,8 @@ def _order_group(table, column, name, prefix):
 
 
 _OTHER = {'channel': frozenset(_PAYMENTS), 'payment': frozenset(_CHANNELS)}
-run_channel = _order_group(_CHANNELS, 'channel', 'channel_revenue', 'channel')
-run_payment = _order_group(_PAYMENTS, 'payment_method', 'payment_revenue', 'payment')
+_order_group(_CHANNELS, 'channel', 'channel_revenue', 'channel')
+_order_group(_PAYMENTS, 'payment_method', 'payment_revenue', 'payment')
 
 
 # ---- rankings the split's rulebook defines by name -------------------------------------------------------------------

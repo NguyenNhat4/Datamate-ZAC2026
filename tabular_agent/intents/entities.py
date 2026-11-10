@@ -65,11 +65,9 @@ class Catalog:
             (masked tokens, entities in order of appearance).
         """
         out, found, i = [], [], 0
-        canon = lambda tok: [v for v in variants(tok)]
         while i < len(tokens):
             token = tokens[i]
-            lead = [f for f in canon(token) if f in ('nhom',)]
-            if lead:
+            if 'nhom' in variants(token):
                 j = i + 1
                 if j < len(tokens) and tokens[j] == 'hang':
                     j += 1

@@ -12,7 +12,7 @@ from tabular_agent.intents import periods as P
 from tabular_agent.intents.text import canonical, collapse, variants
 
 
-def make_bundle(root):
+def make_bundle(root, channel=False):
     """A bundle with rulebook-ready orders and lines, in the shape preparation publishes."""
     con = duckdb.connect(str(Path(root) / 'data.duckdb'))
     con.execute('CREATE SCHEMA semantic')
@@ -27,7 +27,13 @@ def make_bundle(root):
         ('o7', DATE '2026-02-11', TIMESTAMP '2026-02-11 10:00:00', 'returned', 60000, 'c2', 'Bình', FALSE, TRUE, FALSE))
         t(order_id, order_date, created_at, order_state, revenue, customer_key, customer_name, cancelled, returned,
           counts_as_sale)""")
+    if channel:
+        con.execute("ALTER TABLE semantic.orders ADD COLUMN channel VARCHAR")
+        con.execute("UPDATE semantic.orders SET channel = CASE WHEN order_id IN ('o1', 'o4') THEN 'phone' ELSE 'store' END")
     con.execute('CREATE VIEW semantic.eligible_orders AS SELECT * FROM semantic.orders WHERE counts_as_sale')
+    # Tết 2026 in this invented calendar: lunar 23/12/2025 is 2026-02-10 and lunar 10/1/2026 is 2026-02-26.
+    con.execute("CREATE TABLE clean.calendar AS SELECT * FROM (VALUES (DATE '2026-02-10', 23, 12, 2025, FALSE, ''), "
+                "(DATE '2026-02-26', 10, 1, 2026, FALSE, '')) t(date, lunar_day, lunar_month, lunar_year, lunar_leap, holiday)")
     con.execute("""CREATE TABLE semantic.eligible_sales_lines AS SELECT * FROM (VALUES
         ('o1', DATE '2026-03-02', 'Cà phê sữa (M)', 2, 2, 'ly', 60000),
         ('o1', DATE '2026-03-02', 'Trà đào (L)', 1, 1, 'ly', 40000),
@@ -42,11 +48,12 @@ def make_bundle(root):
     def relation(name, columns, **extra):
         return {'name': name, 'grain': 'order', 'columns': [{'name': c, 'type': 'VARCHAR'} for c in columns], **extra}
 
+    order_columns = ['order_id', 'order_date', 'created_at', 'order_state', 'revenue', 'customer_key', 'customer_name',
+                     'cancelled', 'returned', 'counts_as_sale'] + (['channel'] if channel else [])
     schema = {'relations': [
-        relation('semantic.orders', ['order_id', 'order_date', 'created_at', 'order_state', 'revenue', 'customer_key',
-                                     'customer_name', 'cancelled', 'returned', 'counts_as_sale']),
-        relation('semantic.eligible_orders', ['order_id', 'order_date', 'created_at', 'order_state', 'revenue',
-                                              'customer_key', 'customer_name', 'cancelled', 'returned', 'counts_as_sale']),
+        relation('semantic.orders', order_columns),
+        relation('semantic.eligible_orders', order_columns),
+        relation('clean.calendar', ['date', 'lunar_day', 'lunar_month', 'lunar_year', 'lunar_leap', 'holiday']),
         relation('semantic.eligible_sales_lines', ['order_id', 'order_date', 'product_name', 'quantity', 'base_quantity',
                                                    'base_unit', 'line_amount']),
         relation('semantic.product_quantities', ['order_id', 'order_date', 'product_name', 'quantity', 'base_quantity',
@@ -63,6 +70,34 @@ class Scripted:
     def generate(self, messages, **kwargs):
         from types import SimpleNamespace
         return SimpleNamespace(content=self.replies.pop(0), token_usage=None)
+
+
+class ChannelsAndAbsentInformation(unittest.TestCase):
+    AS_OF = '2026-03-20'
+
+    def test_revenue_by_channel_and_its_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            make_bundle(tmp, channel=True)
+            ctx = Context(tmp)
+            try:
+                # Phone orders o1 and o4 count 100000 + 200000 of the 380000 in March.
+                self.assertEqual(answer('doanh thu các đơn bán qua điện thoại tháng 3/2026', self.AS_OF, ctx)[0],
+                                 {'type': 'number', 'answer': 300000})
+                self.assertEqual(answer('doanh thu các đơn bán qua điện thoại chiếm bao nhiêu % tổng doanh thu tháng 3/2026',
+                                        self.AS_OF, ctx)[0], {'type': 'percent', 'answer': 78.95})
+                self.assertEqual(answer('doanh thu các đơn bán qua điện thoại và các đơn bán tại quầy tháng 3/2026 mỗi loại bao nhiêu',
+                                        self.AS_OF, ctx)[0], {'type': 'list', 'answer': [300000, 80000]})
+            finally:
+                ctx.close()
+
+    def test_information_the_data_does_not_record_is_unanswerable_not_guessed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            make_bundle(tmp)  # no channel column, and no source column that looks like one
+            ctx = Context(tmp)
+            try:
+                self.assertEqual(answer('doanh thu các đơn bán qua điện thoại tháng 3/2026', self.AS_OF, ctx)[0]['type'], 'unanswerable')
+            finally:
+                ctx.close()
 
 
 class WithTheModelPath(unittest.TestCase):
@@ -210,6 +245,18 @@ class FixedQueries(unittest.TestCase):
         self.assertEqual(self.ask('khách trung thành nhất tháng 3/2026')[1], {'type': 'string', 'answer': 'An'})
         # Nobody has three orders in the month, so there is no big spender to name.
         self.assertIsNone(self.ask('khách sộp nhất tháng 3/2026'))
+
+    def test_several_months_a_trend_and_the_best_month(self):
+        self.assertEqual(self.ask('doanh thu mỗi tháng từ tháng 2/2026 đến tháng 3/2026')[1], {'type': 'list', 'answer': [100000, 380000]})
+        self.assertEqual(self.ask('cho tôi doanh thu của tháng 2/2026 và tháng 3/2026, ghi lần lượt theo thứ tự đó')[1]['answer'], [100000, 380000])
+        self.assertEqual(self.ask('từ tháng 2/2026 đến tháng 3/2026 tháng nào cửa hàng bán được nhiều tiền nhất')[1],
+                         {'type': 'date', 'answer': '2026-03'})
+        self.assertEqual(self.ask('doanh thu có tăng liên tục qua 2 tháng 2/2026, 3/2026 không')[1], {'type': 'boolean', 'answer': True})
+
+    def test_tet_comes_from_the_lunar_calendar_of_the_bundle(self):
+        # 2026-02-10 to 2026-02-26 holds only the order of the 10th that counts as sales.
+        self.assertEqual(self.ask('doanh thu dịp Tết 2026 là bao nhiêu')[1], {'type': 'number', 'answer': 100000})
+        self.assertIsNone(self.ask('doanh thu dịp Tết 2024 là bao nhiêu'))
 
     def test_a_period_outside_the_data_is_unanswerable_not_zero(self):
         self.assertEqual(self.ask('doanh thu tháng 1/2026 là bao nhiêu')[1]['type'], 'unanswerable')
