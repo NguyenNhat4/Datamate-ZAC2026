@@ -222,9 +222,20 @@ def _relation_base(table_name, sheet, path, inventory, physical=None):
     sheet_base = _partition_base(sheet)
     if _default_sheet(sheet_base):
         return file_base
-    siblings = {text_key(_partition_base(item.get('sheet'))) for item in inventory
-                if item.get('path') == (physical or path) and not _default_sheet(_partition_base(item.get('sheet')))}
-    return sheet_base if len(siblings) > 1 else file_base
+    sheets_of = lambda where: {text_key(_partition_base(item.get('sheet'))) for item in inventory
+                               if item.get('path') == where and not _default_sheet(_partition_base(item.get('sheet')))}
+    siblings = sheets_of(physical or path)
+    if len(siblings) > 1:
+        return sheet_base
+    # A single-sheet file of a series (BanHang_TongHop_2026.xlsx) continues the same-named sheet of a sibling file
+    # whose workbook holds several lists (BanHang_TongHop_2025.xlsx), which is named after the sheet.
+    for item in inventory:
+        other = item.get('path')
+        if other and other != (physical or path) and text_key(_partition_base(Path(other).stem) or Path(other).stem) == text_key(file_base):
+            others = sheets_of(other)
+            if len(others) > 1 and text_key(sheet_base) in others:
+                return sheet_base
+    return file_base
 
 
 def _documented_header(labels, readme):

@@ -90,6 +90,23 @@ class ChannelsAndAbsentInformation(unittest.TestCase):
             finally:
                 ctx.close()
 
+    def test_product_questions_wait_where_names_join_a_dish_and_its_toppings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            make_bundle(tmp)
+            con = duckdb.connect(str(Path(tmp) / 'data.duckdb'))
+            con.execute("UPDATE semantic.eligible_sales_lines SET product_name = product_name || ' + Trân châu đen (7.000đ)' "
+                        "WHERE order_id = 'o5'")
+            con.close()
+            ctx = Context(tmp)
+            try:
+                # Totals do not depend on what the lines are called; a dish's own revenue does (rulebook: the topping is
+                # a product of its own, and preparation does not split it yet).
+                self.assertEqual(answer('doanh thu tháng 3/2026', self.AS_OF, ctx)[0]['answer'], 380000)
+                self.assertIsNone(answer('doanh thu của Cà phê sữa (M) tháng 3/2026', self.AS_OF, ctx))
+                self.assertIsNone(answer('top 3 mặt hàng bán chạy nhất tháng 3/2026', self.AS_OF, ctx))
+            finally:
+                ctx.close()
+
     def test_information_the_data_does_not_record_is_unanswerable_not_guessed(self):
         with tempfile.TemporaryDirectory() as tmp:
             make_bundle(tmp)  # no channel column, and no source column that looks like one

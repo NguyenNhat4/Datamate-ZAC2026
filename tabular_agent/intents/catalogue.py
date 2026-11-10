@@ -45,6 +45,9 @@ class Intent:
         entities: Kinds of catalogue names the question must contain, exactly (product, group, unit, size, customer).
         optional: Kinds that may also occur, any number of times (they are ignored).
         repeat: True when the same period may be named twice ("tháng 3, trong tổng doanh thu tháng 3") and counts once.
+        product_level: True when the answer depends on what each product is called or counts as. Not answered in a
+            bundle whose product names join a dish and its toppings ("Trà đào (M) + Trân châu (7.000đ)"): the rulebook
+            makes the topping its own product, and preparation does not split them yet.
         run: Executor (Context, Parsed) -> answer dict or None. None means "cannot answer here": the model is asked.
     """
     name: str
@@ -55,17 +58,19 @@ class Intent:
     entities: tuple
     optional: tuple
     repeat: bool
+    product_level: bool
     run: Callable
 
 
 INTENTS = []
 
 
-def intent(name, words, need, periods=(1, 1), numbers=(0, 0), entities=(), optional=(), repeat=False):
+def intent(name, words, need, periods=(1, 1), numbers=(0, 0), entities=(), optional=(), repeat=False,
+           product_level=False):
     """Register an intent; decorates its executor."""
     def register(run):
         INTENTS.append(Intent(name, frozenset(words.split()), need, periods, numbers, tuple(sorted(entities)),
-                              tuple(optional), repeat, run))
+                              tuple(optional), repeat, product_level, run))
         return run
     return register
 
@@ -491,7 +496,7 @@ def product_sum(ctx, column, first, last, name):
 
 
 @intent('product_revenue', 'doanhthu cua tong cong ban duoc tien thu ve ra @p mathang hang mon',
-        lambda w, p: '@p' in w and ('doanhthu' in w or 'tien' in w), entities=('product',))
+        lambda w, p: '@p' in w and ('doanhthu' in w or 'tien' in w), entities=('product',), product_level=True)
 def run_product_revenue(ctx, parsed):
     period, product = _one_period(parsed), _entity(parsed, 'product')
     if ctx.outside(period.first, period.last):
@@ -501,7 +506,7 @@ def run_product_revenue(ctx, parsed):
 
 
 @intent('product_quantity', 'so ban duoc tong cong ra @p @u mathang hang mon',
-        lambda w, p: '@p' in w and '@u' in w, entities=('product', 'unit'))
+        lambda w, p: '@p' in w and '@u' in w, entities=('product', 'unit'), product_level=True)
 def run_product_quantity(ctx, parsed):
     period, product, unit = _one_period(parsed), _entity(parsed, 'product'), _entity(parsed, 'unit')
     if not product.unit or prepare(unit.name) != product.unit:
@@ -526,7 +531,7 @@ def run_unit_total(ctx, parsed):
 
 
 @intent('size_total', 'so ban duoc tong cong ra @u @z cong moi mon mathang ca cac tat loai uong do',
-        lambda w, p: '@u' in w and '@z' in w, entities=('unit', 'size'))
+        lambda w, p: '@u' in w and '@z' in w, entities=('unit', 'size'), product_level=True)
 def run_size_total(ctx, parsed):
     period, size = _one_period(parsed), _entity(parsed, 'size')
     if not ctx.has('semantic.product_quantities', 'base_quantity', 'product_name', 'order_date'):
@@ -539,7 +544,7 @@ def run_size_total(ctx, parsed):
 
 
 @intent('group_revenue', 'doanhthu cua tong cong ban duoc tien thu ve ra @g cac mathang hang',
-        lambda w, p: '@g' in w and ('doanhthu' in w or 'tien' in w) and 'phantram' not in w, entities=('group',))
+        lambda w, p: '@g' in w and ('doanhthu' in w or 'tien' in w) and 'phantram' not in w, entities=('group',), product_level=True)
 def run_group_revenue(ctx, parsed):
     period, group = _one_period(parsed), _entity(parsed, 'group')
     if not ctx.has('semantic.eligible_sales_lines', 'line_amount', 'product_group', 'order_date'):
@@ -552,7 +557,7 @@ def run_group_revenue(ctx, parsed):
 
 
 @intent('group_share', 'doanhthu cua tong chiem phantram trong @g dong gop cua ca tiem tile titrong ti',
-        lambda w, p: '@g' in w and 'doanhthu' in w and 'phantram' in w, entities=('group',), periods=(1, 2), repeat=True)
+        lambda w, p: '@g' in w and 'doanhthu' in w and 'phantram' in w, entities=('group',), periods=(1, 2), repeat=True, product_level=True)
 def run_group_share(ctx, parsed):
     period, group = _one_period(parsed), _entity(parsed, 'group')
     if 'semantic.group_revenue_share' not in ctx.functions:
@@ -566,7 +571,7 @@ def run_group_share(ctx, parsed):
 
 @intent('top_products', 'top chay nhat ban nhieu hot mathang hang mon la gi chi nhung nao lietke cho cac @n',
         lambda w, p: bool({'chay', 'hot', 'top'} & w) or ('ban' in w and 'nhieu' in w and 'nhat' in w and bool({'mathang', 'hang', 'mon'} & w)),
-        numbers=(0, 1))
+        numbers=(0, 1), product_level=True)
 def run_top_products(ctx, parsed):
     period = _one_period(parsed)
     if 'semantic.top_products' not in ctx.functions:
@@ -587,7 +592,7 @@ def run_top_products(ctx, parsed):
 
 
 @intent('unsold_products', 'baonhieu unsold han khong khong ban duoc ai mua mon cai nao co tong cong ra mathang ban',
-        lambda w, p: 'unsold' in w or ({'khong', 'mua'} <= w and 'mathang' in w))
+        lambda w, p: 'unsold' in w or ({'khong', 'mua'} <= w and 'mathang' in w), product_level=True)
 def run_unsold(ctx, parsed):
     period = _one_period(parsed)
     if 'semantic.unsold_products' not in ctx.functions:
@@ -598,7 +603,7 @@ def run_unsold(ctx, parsed):
 
 
 @intent('products_in_orders', 'baonhieu mathang xuathien itnhat @n don khacnhau trolen duoc mua o co tong it nhat tu mat gte dem so la',
-        lambda w, p: 'mathang' in w and bool({'xuathien', 'mua', 'mat'} & w) and 'don' in w, numbers=(1, 1))
+        lambda w, p: 'mathang' in w and bool({'xuathien', 'mua', 'mat'} & w) and 'don' in w, numbers=(1, 1), product_level=True)
 def run_products_in_orders(ctx, parsed):
     period, op = _one_period(parsed), operator(parsed.words)
     if op != '>=' or not ctx.has('semantic.eligible_sales_lines', 'order_id', 'product_name', 'order_date'):
@@ -615,7 +620,7 @@ def run_products_in_orders(ctx, parsed):
 @intent('price_change_effect', 'so ban ra trong ketu ngay tanggia len tu voi ngaytruoc ngay do luong tinh theo @u @p @n @t '
         'hay giam tang nhieu it hon thay doi phantram lientruoc truoc duoc sovoi vao ke dong',
         lambda w, p: '@p' in w and 'tanggia' in w and 'phantram' in w, periods=(1, 2), numbers=(2, 6), entities=('product',),
-        optional=('unit',))
+        optional=('unit',), product_level=True)
 def run_price_change(ctx, parsed):
     day = parsed.periods[0]
     if day.kind != 'day' or any(p != day for p in parsed.periods):
@@ -982,7 +987,7 @@ def run_fickle_customer(ctx, parsed):
 
 
 @intent('favourite_product', _RANK_WORDS + ' uuchuong mathang',
-        lambda w, p: 'uuchuong' in w and 'mathang' in w)
+        lambda w, p: 'uuchuong' in w and 'mathang' in w, product_level=True)
 def run_favourite_product(ctx, parsed):
     period = _one_period(parsed)
     if not ctx.has('semantic.eligible_sales_lines', 'order_id', 'product_name', 'order_date'):
@@ -1051,6 +1056,15 @@ def resolve_tet(ctx, parsed):
     return Parsed(parsed.question, parsed.today, parsed.words, resolved, parsed.numbers, parsed.next_word, parsed.entities)
 
 
+def has_toppings_in_names(ctx):
+    """True when product names of the sales lines join a dish and its toppings with " + " (cached per bundle)."""
+    if not hasattr(ctx, 'toppings_in_names'):
+        ctx.toppings_in_names = (ctx.has('semantic.eligible_sales_lines', 'product_name') and ctx.one(
+            "SELECT COUNT(*) FROM (SELECT product_name FROM semantic.eligible_sales_lines WHERE product_name LIKE '% + %' "
+            'LIMIT 1)')[0] > 0)
+    return ctx.toppings_in_names
+
+
 def answer(question, as_of_date, ctx):
     """Answer a question by the first intent that explains it.
 
@@ -1063,6 +1077,8 @@ def answer(question, as_of_date, ctx):
     plain = analyze(question, as_of_date)
     named = analyze(question, as_of_date, ctx.catalog) if (ctx.catalog.products or ctx.catalog.groups or ctx.catalog.units) else None
     for item in INTENTS:
+        if item.product_level and has_toppings_in_names(ctx):
+            continue
         parsed = named if item.entities else plain
         if parsed is not None and any(p.kind in ('tet', 'tet_before') for p in parsed.periods):
             parsed = resolve_tet(ctx, parsed)
