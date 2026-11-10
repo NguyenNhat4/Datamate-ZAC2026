@@ -65,6 +65,15 @@ def time_limit(seconds):
         signal.signal(signal.SIGALRM, previous)
 
 
+def local_base_url():
+    """Return the URL of the local benchmark model server started by scripts/serve-local.sh.
+
+    Returns:
+        Loopback OpenAI-compatible URL on LOCAL_PORT, 18234 when unset.
+    """
+    return f"http://127.0.0.1:{os.getenv('LOCAL_PORT') or '18234'}/v1"
+
+
 def parser():
     """Build the command-line interface without parsing arguments.
 
@@ -78,18 +87,19 @@ def parser():
         command = commands.add_parser(name)
         command.add_argument('--provider', choices=['local', 'openai'], default='local',
                              help='Model provider: local server (default) or OpenAI API')
-        command.add_argument('--backend', choices=['openai', 'ollama'], default=os.getenv('BACKEND', 'openai'))
-        command.add_argument('--base-url', help='Local server URL (only with --provider local)')
-        command.add_argument('--model', help='Model name; defaults to OPENAI_MODEL for OpenAI or MODEL for local')
+        command.add_argument('--base-url', help='Local server URL (only with --provider local); defaults to the '
+                                                'benchmark server on LOCAL_PORT (18234)')
+        command.add_argument('--model', help='Model name; defaults to OPENAI_MODEL for OpenAI, or to LOCAL_MODEL_ALIAS '
+                                             '(local-coder-7b) for local')
         command.add_argument('--split', default='data/train')
         command.add_argument('--output')
-        command.add_argument('--limit', type=int, default=20 if name == 'bench' else 0)
+        command.add_argument('--limit', type=int, default=0, help='Questions to sample; 0 (default) keeps all selected')
         command.add_argument('--seed', type=int, default=42)
         command.add_argument('--temperature', type=float, default=0.0,
                              help='Sampling temperature for the local server (default 0: repeatable runs)')
         command.add_argument('--business')
         command.add_argument('--question-id', action='append', default=[])
-        command.add_argument('--max-steps', type=int, default=4)
+        command.add_argument('--max-steps', type=int, default=6)
         command.add_argument('--max-tokens', type=int, default=2048)
         command.add_argument('--question-timeout', type=float, default=60)
         command.add_argument('--exec-timeout', type=float, default=30)
@@ -114,7 +124,7 @@ def parser():
         command.add_argument('--output', default='artifacts/prepared' if name == 'prepare' else None)
         command.add_argument('--spec', help='Saved declarative specification, for a single business')
         command.add_argument('--model', help='Optional already-served local model for ambiguous preparation decisions')
-        command.add_argument('--base-url', default='http://127.0.0.1:8000/v1')
+        command.add_argument('--base-url', default=local_base_url())
         command.add_argument('--deadline', type=float, default=600)
         command.add_argument('--memory-limit', default='1GB')
     return parser
@@ -218,10 +228,10 @@ def run(args):
         model_name = args.model or openai_model_name()
         model = create_openai_model(model_name, max_tokens=args.max_tokens, timeout=args.model_timeout)
     else:
-        base = args.base_url or os.getenv('BASE_URL') or ('http://127.0.0.1:11434/v1' if args.backend == 'ollama' else 'http://127.0.0.1:8000/v1')
-        local_name = args.model or os.getenv('MODEL')
-        if not local_name:
-            raise ValueError('Set --model to the local model server alias')
+        # Only the server's own LOCAL_* settings (scripts/local-model.sh) are read: importing smolagents loads .env
+        # into the environment, where generic names such as MODEL or BASE_URL may belong to other tools.
+        base = args.base_url or local_base_url()
+        local_name = args.model or os.getenv('LOCAL_MODEL_ALIAS') or 'local-coder-7b'
         model = create_model(local_name, base, max_tokens=args.max_tokens, timeout=args.model_timeout, seed=args.seed,
                              temperature=args.temperature)
     if args.command == 'doctor':

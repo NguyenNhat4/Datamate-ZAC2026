@@ -20,14 +20,14 @@ Why each condition exists is explained in the [unseen businesses record](2026-11
 
 | Setting | Value | Where it is set |
 |---|---|---|
-| Model | `local-coder-7b`: Qwen2.5-Coder-7B-Instruct, Q4_K_M, weights sha256 `60e05f21…c2463` | `MODEL_FILE` in `scripts/bench-local.sh` and `serve-local.sh` |
-| Server | llama-server b12015 on `Vulkan1`; all GPU layers; context 16,384; q8_0 KV cache; `--parallel 1`; no context shift; prompt cache on | the same scripts |
+| Model | `local-coder-7b`: Qwen2.5-Coder-7B-Instruct, Q4_K_M, weights sha256 `60e05f21…c2463` | `MODEL_FILE` in `scripts/local-model.sh`, which `serve-local.sh`, `bench-local.sh` and `predict.sh` read |
+| Server | llama-server b12015 on `Vulkan1`; all GPU layers; context 16,384; q8_0 KV cache; `--parallel 1`; no context shift; prompt cache on | the same file |
 | Port | 18234 | `LOCAL_PORT` |
 | Temperature | 0 | CLI default since `82ebdb6`; older commits do not send it |
 | DuckDB threads for answering | 1 | in code since `c509cba` |
 | Seed | 42 | `--seed` |
-| Steps per question | 6 | `--max-steps`. **The default is 4** |
-| Questions | all selected | `--limit 0`. **The `bench` default is 20** |
+| Steps per question | 6 | `--max-steps`; the CLI default since the cleanup (10 November). **Commits before it default to 4**: pass it |
+| Questions | all selected | `--limit 0`; the default since the cleanup. **Before it, `bench` kept 20**: pass it |
 | Question timeout, reply tokens | 60 s, 2,048 | CLI defaults |
 | Split | `data/train` | `--split` |
 
@@ -215,10 +215,10 @@ Older runs (`fix2` to `fix7`, `step1*`, `v2`, `baseline`, `check-*`) ran at the 
 
 ## 10. Traps
 
-1. **Selection limit.** `make bench` and `cli bench` keep only 20 questions unless `--limit 0` (`LIMIT=0`) is given.
-2. **Step limit.** The default is 4; SQL runs use `--max-steps 6`.
+1. **Selection limit.** At commits before the cleanup (10 November), `cli bench` keeps only 20 questions unless `--limit 0` is given. Keep passing it, so a command also works on an older worktree.
+2. **Step limit.** At commits before the cleanup the default is 4; SQL runs use `--max-steps 6`. Keep passing it.
 3. **Missing bundles.** A business missing from the `--prepared` folder abstains silently (section 2).
-4. **Old ports.** The README examples and `make bench` still assume port 8000. The benchmarks use 18234.
+4. **Old ports and the raw-file agent.** Since the cleanup, the CLI, `make bench` and `serve-local.sh` default to port 18234 (`LOCAL_PORT`) and `make bench` needs `BUNDLES`. Older commits default to port 8000 and answer with the retired raw-file agent when `--prepared` is missing.
 5. **Dirty tree.** A run from a dirty tree or from the main folder is not attributable. Check `dirty` in the manifest.
 6. **Older commits.** Commits before `82ebdb6` send no temperature, and commits before `c509cba` order tied rows arbitrarily. Neither repeats exactly.
 7. **Question order.** Selected questions run in file order, not in the order of the ids given. The order is still fixed, so runs repeat.

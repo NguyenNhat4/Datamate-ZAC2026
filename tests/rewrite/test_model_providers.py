@@ -120,7 +120,22 @@ class ProviderTests(unittest.TestCase):
             run(args)
 
     def test_default_provider_remains_local(self):
-        args = parser().parse_args(['doctor', '--backend', 'openai', '--model', 'fixture'])
+        args = parser().parse_args(['doctor', '--model', 'fixture'])
         with patch.dict(os.environ, {}, clear=True), patch('tabular_agent.cli.create_model') as create:
             self.assertEqual(run(args), 0)
-        self.assertEqual(create.call_args.args[:2], ('fixture', 'http://127.0.0.1:8000/v1'))
+        self.assertEqual(create.call_args.args[:2], ('fixture', 'http://127.0.0.1:18234/v1'))
+
+    def test_local_defaults_follow_the_benchmark_server(self):
+        args = parser().parse_args(['doctor'])
+        with patch.dict(os.environ, {'LOCAL_PORT': '19000', 'LOCAL_MODEL_ALIAS': 'alias'}, clear=True), \
+             patch('tabular_agent.cli.create_model') as create:
+            self.assertEqual(run(args), 0)
+        self.assertEqual(create.call_args.args[:2], ('alias', 'http://127.0.0.1:19000/v1'))
+
+    def test_local_defaults_ignore_generic_environment_names(self):
+        # Importing smolagents loads .env into the environment; its MODEL or BASE_URL may be meant for other tools.
+        args = parser().parse_args(['doctor'])
+        with patch.dict(os.environ, {'MODEL': 'gpt-4o-mini', 'BASE_URL': 'http://127.0.0.1:1234/v1', 'BACKEND': 'ollama'},
+                        clear=True), patch('tabular_agent.cli.create_model') as create:
+            self.assertEqual(run(args), 0)
+        self.assertEqual(create.call_args.args[:2], ('local-coder-7b', 'http://127.0.0.1:18234/v1'))

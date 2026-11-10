@@ -1,32 +1,16 @@
 #!/usr/bin/env bash
+# One benchmark set on a freshly started local model server (docs/fix/RUNBOOK.md, section 4): start the server
+# through serve-local.sh, wait until it is ready, run `cli bench` with the server and weight metadata, and stop the
+# server on exit. Arguments are passed to `cli bench`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-model_file="${MODEL_FILE:-$PWD/models/ollama/blobs/sha256-60e05f2100071479f596b964f89f510f057ce397ea22f2833a0cfe029bfc2463}"
-server_bin="${LLAMA_SERVER:-$PWD/models/runtime/llama-b12015/llama-server}"
-port="${LOCAL_PORT:-18234}"
-device="${LOCAL_DEVICE:-Vulkan1}"
-context="${LOCAL_CONTEXT:-16384}"
-gpu_layers="${LOCAL_GPU_LAYERS:-all}"
-alias="${LOCAL_MODEL_ALIAS:-local-coder-7b}"
-cache_k="${LOCAL_CACHE_TYPE_K:-q8_0}"
-cache_v="${LOCAL_CACHE_TYPE_V:-q8_0}"
+source scripts/local-model.sh
 [[ -f "$model_file" && -x "$server_bin" ]] || { echo "Local model or llama-server is missing; see README.md." >&2; exit 1; }
 weight_digest=$(sha256sum -- "$model_file" | cut -d ' ' -f 1)
-# Fail if the port is occupied; never send question data to an unknown listener.
-.venv-native/bin/python - "$port" <<'PY'
-import socket, sys
-with socket.socket() as sock:
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(('127.0.0.1', int(sys.argv[1])))
-    except OSError as exc:
-        raise SystemExit(f'Local port is unavailable: {exc}')
-PY
+refuse_busy_port
 mkdir -p .cache
 server_log="$PWD/.cache/llama-server-$$.log"
-"$server_bin" -m "$model_file" --alias "$alias" --host 127.0.0.1 --port "$port" \
-  --device "$device" --n-gpu-layers "$gpu_layers" --ctx-size "$context" --parallel 1 --flash-attn on \
-  --cache-type-k "$cache_k" --cache-type-v "$cache_v" --no-context-shift >"$server_log" 2>&1 &
+./scripts/serve-local.sh >"$server_log" 2>&1 &
 server_pid=$!
 cleanup() { kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; }
 trap cleanup EXIT
@@ -46,6 +30,6 @@ for ((i=0; i<120; i++)); do
   fi
   sleep 1
 done
-.venv-native/bin/python -m tabular_agent.cli bench --backend openai --base-url "http://127.0.0.1:$port/v1" --model "$alias" \
+.venv-native/bin/python -m tabular_agent.cli bench --base-url "http://127.0.0.1:$port/v1" --model "$alias" \
   --context "$context" --weight-sha256 "$weight_digest" --gpu-layers "$gpu_layers" \
   --cache-type-k "$cache_k" --cache-type-v "$cache_v" "$@"

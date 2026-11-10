@@ -12,10 +12,10 @@ make prepare
 
 `SPLIT` defaults to `data/train`. Omit `--business` to process every business directory. `OUT` selects an artifact directory outside the source split. Profile reports default to `artifacts/profiles/`; prepared bundles default to `artifacts/prepared/`. These directories are Git-ignored and may contain real business records.
 
-An already running local model is optional:
+An already running local model (`make serve`, port 18234) is optional:
 
 ```bash
-make prepare ARGS="--business shop_directory --model local-coder-7b --base-url http://127.0.0.1:8000/v1"
+make prepare ARGS="--business shop_directory --model local-coder-7b"
 ```
 
 The model receives bounded source samples and relevant documentation only when layout or meaning is ambiguous. Suggestions are declarative JSON, with one correction opportunity. It cannot run generated code. Only a loopback HTTP model endpoint is accepted. Model weights/dependencies must already be provisioned before inference; preparation does not download them.
@@ -80,12 +80,14 @@ Supporting rules, all derived from the rulebook or README and never from a busin
 
 ## Answering from a bundle
 
-`bench` and `predict` accept `--prepared <directory>` to answer with SQL over prepared bundles instead of reading raw files:
+`bench` and `predict` answer with SQL over the bundles in one folder, given as `--prepared <directory>` (`BUNDLES=` in the Makefile). The CLI defaults are the benchmark settings: temperature 0 and at most six steps.
 
 ```bash
-make prepare OUT=artifacts/prepared
-make bench-local LIMIT=10 ARGS="--prepared artifacts/prepared --max-steps 6"
+make prepare OUT=artifacts/prepared-example ARGS="--business shop_directory"
+make bench-local BUNDLES=artifacts/prepared-example LIMIT=10
 ```
+
+To measure a commit, follow [the runbook](fix/RUNBOOK.md): its section 2 lists the current bundle folders, and section 4 runs each frozen set on a fresh server.
 
 The model receives the rulebook, the business README, the schema (semantic relations first, with query patterns for the relations the bundle has), explicit date ranges derived from `as_of_date`, the observed sales date range and the question. It writes one `SELECT` at a time and sees bounded results. Queries run read-only with external access disabled and are checked against the published relations and table functions; private audit tables, other table functions and non-`SELECT` statements are rejected. Label columns with at most 12 distinct values show those values; names, identifiers and free text never do. A business with no bundle is answered with an abstention.
 

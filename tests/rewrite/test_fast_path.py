@@ -67,7 +67,8 @@ class HelperTests(unittest.TestCase):
 
     def test_cli_defaults_to_single_agent_budgets(self):
         args = parser().parse_args(['predict'])
-        self.assertEqual(args.max_steps, 4)
+        self.assertEqual(args.max_steps, 6)
+        self.assertEqual(args.limit, 0)
         self.assertEqual(args.question_timeout, 60)
         self.assertFalse(hasattr(args, 'agent_mode'))
 

@@ -11,9 +11,7 @@ result_dir="${RESULT_DIR:-/result}"
 work_dir="${WORK_DIR:-${TMPDIR:-/tmp}/tabular-agent-$$}"   # prepared bundles; writable, outside data and results
 budget="${RUN_SECONDS:-21600}"             # whole run, including preparation and model loading
 margin="${STOP_MARGIN_SECONDS:-300}"       # answering stops this long before the budget ends
-model_file="${MODEL_FILE:-$PWD/models/ollama/blobs/sha256-60e05f2100071479f596b964f89f510f057ce397ea22f2833a0cfe029bfc2463}"
-port="${LOCAL_PORT:-18234}"
-alias="${LOCAL_MODEL_ALIAS:-local-coder-7b}"
+source scripts/local-model.sh              # model file, port, alias and server settings of the benchmark runs
 python=.venv-native/bin/python
 mkdir -p "$work_dir"
 note() { printf '%s %6ss %s\n' "$(date -u +%FT%TZ)" "$SECONDS" "$*" | tee -a "$work_dir/pipeline.log"; }
@@ -33,18 +31,9 @@ if [[ -n "${BASE_URL:-}" ]]; then
   base_url="$BASE_URL"                     # an already running OpenAI-compatible server
   note "using the server at $base_url"
 else
-  # Refuse an occupied port: never send question data to an unknown listener.
-  "$python" - "$port" <<'PY'
-import socket, sys
-with socket.socket() as sock:
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(('127.0.0.1', int(sys.argv[1])))
-    except OSError as exc:
-        raise SystemExit(f'Local port is unavailable: {exc}')
-PY
-  # Same server settings as the benchmark runs; scripts/serve-local.sh reads the LOCAL_* variables.
-  LOCAL_PORT="$port" ./scripts/serve-local.sh > "$work_dir/llama-server.log" 2>&1 &
+  refuse_busy_port
+  # Same server settings as the benchmark runs: serve-local.sh reads scripts/local-model.sh too.
+  ./scripts/serve-local.sh > "$work_dir/llama-server.log" 2>&1 &
   server_pid=$!
   base_url="http://127.0.0.1:$port/v1"
   note "model server starting (pid $server_pid)"
@@ -69,9 +58,8 @@ if [[ -n "$server_pid" ]]; then
   done
   note "model server ready"
   wait "$digest_pid"
-  metadata=(--weight-sha256 "$(cut -d ' ' -f 1 "$work_dir/weights.sha256")" --context "${LOCAL_CONTEXT:-16384}"
-            --gpu-layers "${LOCAL_GPU_LAYERS:-all}" --cache-type-k "${LOCAL_CACHE_TYPE_K:-q8_0}"
-            --cache-type-v "${LOCAL_CACHE_TYPE_V:-q8_0}")
+  metadata=(--weight-sha256 "$(cut -d ' ' -f 1 "$work_dir/weights.sha256")" --context "$context"
+            --gpu-layers "$gpu_layers" --cache-type-k "$cache_k" --cache-type-v "$cache_v")
 fi
 
 remaining=$((budget - SECONDS - margin))
