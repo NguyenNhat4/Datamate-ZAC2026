@@ -625,7 +625,7 @@ def run_products_in_orders(ctx, parsed):
 
 
 @intent('price_change_effect', 'so ban ra trong ketu ngay tanggia len tu voi ngaytruoc ngay do luong tinh theo @u @p @n @t '
-        'hay giam tang nhieu it hon thay doi phantram lientruoc truoc duoc sovoi vao ke dong',
+        'hay giam tang nhieu it hon thay doi phantram lientruoc truoc truocdo duoc sovoi vao ke dong',
         lambda w, p: '@p' in w and 'tanggia' in w and 'phantram' in w, periods=(1, 2), numbers=(2, 6), entities=('product',),
         optional=('unit',), product_level=True)
 def run_price_change(ctx, parsed):
@@ -824,7 +824,7 @@ def run_customer_debt_flow(ctx, parsed):
 
 # ---- stock ---------------------------------------------------------------------------------------------------------
 
-_STOCK_WORDS = 'ton kho cuoi ngay hom nay trong con lai het la baonhieu @p @u luc duoc mathang hang tinh den may kho'
+_STOCK_WORDS = 'ton kho cuoi ngay hom nay trong con lai het la baonhieu @p @u luc duoc mathang hang tinh den may kho va'
 
 
 def _stock_rows(ctx, parsed):
