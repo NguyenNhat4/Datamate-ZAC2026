@@ -60,6 +60,15 @@ class RelationNames(unittest.TestCase):
             self.assertEqual(_relation_base(None, "Sheet1", path, []), "Sales", path)
         self.assertEqual(_relation_base(None, "Sheet1", "SalesDetail.xlsx", []), "SalesDetail")
 
+    def test_a_single_sheet_yearly_file_continues_the_sheet_of_its_sibling(self):
+        inventory = [{"path": "Book_2025.xlsx", "sheet": "Sales"}, {"path": "Book_2025.xlsx", "sheet": "Products"},
+                     {"path": "Book_2026.xlsx", "sheet": "Sales"}]
+        self.assertEqual(_relation_base(None, "Sales", "Book_2025.xlsx", inventory), "Sales")
+        self.assertEqual(_relation_base(None, "Sales", "Book_2026.xlsx", inventory), "Sales")
+        # A file of another series keeps its own name.
+        other = inventory[:2] + [{"path": "Other_2026.xlsx", "sheet": "Sales"}]
+        self.assertEqual(_relation_base(None, "Sales", "Other_2026.xlsx", other), "Other")
+
     def test_differently_named_sheets_are_separate_relations(self):
         inventory = [{"path": "Export.xlsx", "sheet": "Products"}, {"path": "Export.xlsx", "sheet": "Receipts"}]
         self.assertEqual(_relation_base(None, "Products", "Export.xlsx", inventory), "Products")

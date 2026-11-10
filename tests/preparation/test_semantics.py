@@ -72,6 +72,13 @@ class Semantics(unittest.TestCase):
                                      readme=readme, rulebook=RULES)
             self.assertEqual(proposal["roles"], {"order_id": 0, "line_amount": 1}, month)
 
+    def test_common_vietnamese_headers_of_a_sales_sheet_get_their_roles(self):
+        proposal = propose_table(["Đơn số", "Dòng", "Ngày HĐ", "Hàng hóa", "ĐV", "S.L", "Thành tiền (đ)", "Trạng thái giao"],
+                                 source_name="BanHang.xlsx::BanHang", readme="", rulebook=RULES)
+        self.assertEqual(proposal["grain"], "order_item")
+        self.assertEqual(proposal["roles"], {"order_id": 0, "line_number": 1, "order_date": 2, "product_name": 3, "unit": 4,
+                                             "quantity": 5, "line_amount": 6, "status": 7})
+
     def test_orderless_records_never_gain_artificial_order_identity(self):
         result = self.propose(["Tên hàng", "Ngày bán", "Số lượng", "Thành tiền"])
         self.assertEqual(result["grain"], "sale_recording")
