@@ -111,6 +111,8 @@ Price-change effect, purchase prices, product attributes (active ingredient, pre
 - Query patterns for "days with revenue of at least X" (daily totals) and "products with no sales in a period" (from the catalogue) (6.3).
 - Make query results repeatable when rows tie: for example, one DuckDB thread for answering, or a tie-breaking order added to ranked results (6.3). Until then, a single changed outcome between two runs may be noise.
 
+The next round made tied query results repeatable (one DuckDB thread; ties still follow stored row order unless the query breaks them), added a customers-by-money ranking without walk-in orders (Later, item 3), a daily-totals pattern, and unsold products by the rulebook's definition (sold before the period, not from the catalogue): [rankings, ties and missing query patterns](../2026-11-10_rankings_and_patterns/README.md).
+
 ## 5. Decisions
 
 Entries are added as each step is done.
