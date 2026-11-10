@@ -113,29 +113,3 @@ def question_span(question):
     return _provider.get_tracer(__name__).start_as_current_span(
         'answer_question', attributes={'question.id': question.get('id', ''),
                                        'business.id': question.get('business_id', '')})
-
-
-def record_tool_calls(calls):
-    """Export worker-observed helper calls beneath the current agent step.
-
-    Args:
-        calls: Iterable of dictionaries with name, started_ns, ended_ns and
-            summarized arguments, plus optional result and error text.
-
-    Returns:
-        None. Creates TOOL spans with recorded timestamps and marks failed
-        calls as errors. Does nothing when tracing is disabled.
-    """
-    if _provider is None:
-        return
-    from opentelemetry.trace import Status, StatusCode
-
-    tracer = _provider.get_tracer(__name__)
-    for call in calls:
-        span = tracer.start_span(call['name'], start_time=call['started_ns'], attributes={
-            'openinference.span.kind': 'TOOL', 'tool.name': call['name'],
-            'input.value': call['arguments'], 'output.value': call.get('result', ''),
-        })
-        if call.get('error'):
-            span.set_status(Status(StatusCode.ERROR, call['error']))
-        span.end(end_time=call['ended_ns'])

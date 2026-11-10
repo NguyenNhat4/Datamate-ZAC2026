@@ -61,7 +61,7 @@ class EvaluationSplits(unittest.TestCase):
 
     def test_business_partitions_are_disjoint_and_stable(self):
         qs = [{'id': f'{i}-{j}', 'business_id': f'shop-{i}', 'question': 'q', 'as_of_date': '2026-01-01'} for i in range(80) for j in range(3)]
-        partitions = {p: select_questions(qs, parser().parse_args(['bench', '--partition', p, '--limit', '0'])) for p in ('dev', 'validation', 'holdout')}
+        partitions = {p: select_questions(qs, parser().parse_args(['bench', '--prepared', 'bundles', '--partition', p, '--limit', '0'])) for p in ('dev', 'validation', 'holdout')}
         businesses = [{q['business_id'] for q in values} for values in partitions.values()]
         self.assertTrue(all(businesses))
         self.assertTrue(all((not a & b for i, a in enumerate(businesses) for b in businesses[i + 1:])))
@@ -69,6 +69,6 @@ class EvaluationSplits(unittest.TestCase):
 
     def test_balanced_sample_covers_businesses_before_repeating(self):
         qs = [{'id': f'{i}-{j}', 'business_id': f'shop-{i}', 'question': 'q', 'as_of_date': '2026-01-01'} for i in range(5) for j in range(20)]
-        sample = select_questions(qs, parser().parse_args(['bench', '--limit', '5', '--seed', '7', '--sample', 'balanced']))
+        sample = select_questions(qs, parser().parse_args(['bench', '--prepared', 'bundles', '--limit', '5', '--seed', '7', '--sample', 'balanced']))
         self.assertEqual(len({q['business_id'] for q in sample}), 5)
-        self.assertEqual(sample, select_questions(qs, parser().parse_args(['bench', '--limit', '5', '--seed', '7', '--sample', 'balanced'])))
+        self.assertEqual(sample, select_questions(qs, parser().parse_args(['bench', '--prepared', 'bundles', '--limit', '5', '--seed', '7', '--sample', 'balanced'])))

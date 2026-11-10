@@ -17,7 +17,7 @@ BUNDLES ?=
 PREPARED ?= artifacts/prepared-r2-dev artifacts/prepared-r2-unseen artifacts/prepared-r2-public
 need_bundles = $(if $(BUNDLES),,$(error Set BUNDLES to one folder of prepared bundles, for example BUNDLES=artifacts/prepared-r2-dev))
 
-.PHONY: help setup ui serve serve-local telemetry bench bench-local demo predict doctor profile prepare test test-sandbox check
+.PHONY: help setup ui serve serve-local telemetry bench bench-local predict doctor profile prepare test check
 help:
 	@echo 'make setup                           Install the locked dependencies into .venv-native'
 	@echo 'make serve                           Start the local model server (benchmark settings, port 18234)'
@@ -27,6 +27,7 @@ help:
 	@echo 'make bench BUNDLES=folder LIMIT=20   Benchmark against the running server; LIMIT=0 (default) runs all'
 	@echo 'make bench-local BUNDLES=folder      Same, on a freshly started server that stops afterwards'
 	@echo 'make predict SPLIT=data/public_test BUNDLES=folder   Predict without reading reference answers'
+	@echo 'make doctor                          Show which model server a run would use, without calling it'
 	@echo 'make telemetry                       Start local Phoenix for trace inspection'
 	@echo 'make test                            Synthetic checks; no model is called'
 	@echo 'make check                           Compile all modules and check whitespace'
@@ -48,8 +49,6 @@ bench: setup
 	$(need_bundles)$(PYTHON) -m tabular_agent.cli bench --split "$(SPLIT)" --prepared "$(BUNDLES)" --limit "$(LIMIT)" --seed "$(SEED)" $(if $(OUT),--output "$(OUT)",) $(ARGS)
 bench-local: setup
 	$(need_bundles)./scripts/bench-local.sh --split "$(SPLIT)" --prepared "$(BUNDLES)" --limit "$(LIMIT)" --seed "$(SEED)" $(if $(OUT),--output "$(OUT)",) $(ARGS)
-demo: setup
-	$(PYTHON) -m tabular_agent.demo --run
 predict: setup
 	$(need_bundles)$(PYTHON) -m tabular_agent.cli predict --split "$(SPLIT)" --prepared "$(BUNDLES)" --limit 0 --seed "$(SEED)" $(if $(OUT),--output "$(OUT)",) $(ARGS)
 doctor: setup
@@ -59,10 +58,7 @@ profile: setup
 prepare: setup
 	$(PYTHON) -m tabular_agent.cli prepare --split "$(SPLIT)" $(if $(OUT),--output "$(OUT)",) $(ARGS)
 test: setup
-	$(PYTHON) -m unittest discover -s tests/rewrite -v
-	$(PYTHON) -m unittest discover -s tests/preparation -v
-test-sandbox: setup
-	env RUN_SANDBOX_TESTS=1 $(PYTHON) -m unittest discover -s tests/rewrite -v
+	$(PYTHON) -m unittest discover -s tests/answering -v
 	$(PYTHON) -m unittest discover -s tests/preparation -v
 check:
 	$(PYTHON) -m compileall -q tabular_agent tests streamlit_app.py

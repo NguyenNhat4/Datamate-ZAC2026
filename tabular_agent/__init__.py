@@ -1,1 +1,1 @@
-"""A small smolagents-based tabular question-answering application."""
+"""Vietnamese tabular question answering: data preparation into DuckDB bundles and SQL answering over them."""

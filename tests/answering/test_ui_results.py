@@ -43,8 +43,8 @@ class UIResults(unittest.TestCase):
             {'id': 'q1', 'type': 'number', 'answer': 1},
             {'id': 'q2', 'type': 'abstain', 'reason': 'fixture'},
         ])
-        timings = [{'id': 'q1', 'seconds': 1.5, 'model_calls': 2, 'retries': 0},
-                   {'id': 'q2', 'seconds': 0.5, 'model_calls': 1, 'retries': 0}]
+        timings = [{'id': 'q1', 'seconds': 1.5, 'model_calls': 2},
+                   {'id': 'q2', 'seconds': 0.5, 'model_calls': 1}]
         (self.output / 'timings.json').write_text(json.dumps(timings), encoding='utf-8')
         self.write_jsonl(self.output / 'logs' / '000000.jsonl', [
             {'stage': 'schema', 'text': 'semantic.orders (one row per order)'},
@@ -52,6 +52,7 @@ class UIResults(unittest.TestCase):
              'token_usage': {}},
             {'stage': 'sql', 'sql': 'SELECT 1'},
             {'stage': 'observation', 'text': 'Result:\n1'},
+            {'stage': 'question_timing', 'id': 'q1', 'seconds': 1.5, 'answer': {'type': 'number', 'answer': 1}},
         ])
 
     @staticmethod
@@ -73,8 +74,9 @@ class UIResults(unittest.TestCase):
         self.assertIn('Second question', headings)
         self.assertIn('Actions and observations', headings)
         self.assertNotIn('Internal score', headings)
-        self.assertIn('1.50s · 2 model calls · 0 retries', [item.value for item in app.caption])
+        self.assertIn('1.50s · 2 model calls', [item.value for item in app.caption])
         self.assertIn('SELECT 1', [item.value for item in app.code])
+        self.assertIn('Final answer: {"type": "number", "answer": 1}', [item.value for item in app.caption])
 
     def test_scored_run_shows_the_internal_score(self):
         report = {'evaluator': 'internal-not-official', 'total': 2, 'correct': 1, 'wrong': 0, 'abstain': 1,

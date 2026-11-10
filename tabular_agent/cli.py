@@ -1,4 +1,4 @@
-"""Command-line entry point for local inference and scoring."""
+"""Command-line entry point: prepare data, answer questions with SQL over prepared bundles, and score."""
 import argparse
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -14,7 +14,6 @@ import subprocess
 import sys
 import time
 
-from .agent import answer_question, source_preview
 from .contracts import read_jsonl
 from .evaluate import score
 from .sql_agent import answer_question_sql, find_bundles
@@ -78,10 +77,11 @@ def parser():
     """Build the command-line interface without parsing arguments.
 
     Returns:
-        ArgumentParser defining bench, predict, doctor and score subcommands,
-        including provider, data selection, timing and output settings.
+        ArgumentParser defining bench, predict, doctor, score, profile and
+        prepare subcommands, including provider, data selection, timing and
+        output settings.
     """
-    parser = argparse.ArgumentParser(description='Local tabular CodeAgent')
+    parser = argparse.ArgumentParser(description='Tabular question answering with SQL over prepared bundles')
     commands = parser.add_subparsers(dest='command', required=True)
     for name in ('bench', 'predict', 'doctor'):
         command = commands.add_parser(name)
@@ -102,7 +102,6 @@ def parser():
         command.add_argument('--max-steps', type=int, default=6)
         command.add_argument('--max-tokens', type=int, default=2048)
         command.add_argument('--question-timeout', type=float, default=60)
-        command.add_argument('--exec-timeout', type=float, default=30)
         command.add_argument('--model-timeout', type=float, default=120)
         command.add_argument('--telemetry', action='store_true', help='Send traces to local Phoenix on port 6006')
         command.add_argument('--run-timeout', type=float, default=21600)
@@ -110,7 +109,8 @@ def parser():
         command.add_argument('--partition', choices=['all', 'dev', 'validation', 'holdout'], default='all')
         command.add_argument('--partition-seed', type=int, default=42)
         command.add_argument('--sample', choices=['random', 'balanced'], default='random')
-        command.add_argument('--prepared', help='Directory of prepared bundles; answer with SQL over clean data instead of raw files')
+        command.add_argument('--prepared', required=name != 'doctor',
+                             help='Folder of prepared bundles (make prepare); a business without a bundle abstains')
         for flag in ('weight-sha256', 'gpu-layers', 'cache-type-k', 'cache-type-v'):
             command.add_argument('--' + flag)
     sub = commands.add_parser('score')
@@ -212,12 +212,14 @@ def run(args):
             per-question error handler.
 
     Notes:
-        Converts question failures and deadlines into abstentions. Stops the
-        run when its total budget expires, preserving completed answers. Each
-        question is capped at four steps and 60 seconds or lower configured
-        limits. Logs and model requests may contain business data.
+        Answers each question with SQL over its business's prepared bundle; a
+        business without a bundle abstains. Converts question failures and
+        deadlines into abstentions. Stops the run when its total budget
+        expires, preserving completed answers. Each question is capped at six
+        steps and 60 seconds or lower configured limits. Logs and model
+        requests may contain business data.
     """
-    if any(not math.isfinite(x) or x <= 0 for x in (args.max_steps, args.max_tokens, args.exec_timeout,
+    if any(not math.isfinite(x) or x <= 0 for x in (args.max_steps, args.max_tokens,
                                                      args.question_timeout, args.model_timeout, args.run_timeout)) or args.limit < 0:
         raise ValueError('Timeouts and step/token limits must be positive; limit cannot be negative')
     if not math.isfinite(args.temperature) or args.temperature < 0:
@@ -261,14 +263,14 @@ def run(args):
         revision = None
         dirty = None
     dependencies = {}
-    for name in ('smolagents', 'pandas', 'openpyxl', 'openai', 'httpx'):
+    for name in ('smolagents', 'pandas', 'openpyxl', 'openai', 'httpx', 'duckdb'):
         try:
             dependencies[name] = version(name)
         except PackageNotFoundError:
             dependencies[name] = None
     manifest = {'revision': revision, 'python': sys.version.split()[0], 'model': model_name if args.provider == 'openai' else local_name,
                 'dirty': dirty, 'dependencies': dependencies, 'provider': args.provider,
-                'base_url': base if args.provider == 'local' else None, 'agent_mode': 'sql' if args.prepared else 'single',
+                'base_url': base if args.provider == 'local' else None, 'agent_mode': 'sql',
                 'prepared': args.prepared, 'seed': args.seed,
                 'temperature': args.temperature if args.provider == 'local' else None,
                 'partition': args.partition, 'partition_seed': args.partition_seed, 'sample': args.sample,
@@ -277,10 +279,9 @@ def run(args):
                 'cache_type_k': args.cache_type_k, 'cache_type_v': args.cache_type_v}
     (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     rulebook = (split / 'rulebook.md').read_text(encoding='utf-8')
-    bundles = find_bundles(args.prepared) if args.prepared else None
+    bundles = find_bundles(args.prepared)
     predictions = []
     timings = []
-    previews = {}
     stop_at = time.monotonic() + args.run_timeout
     with (output / 'submission.jsonl').open('w', encoding='utf-8') as submission:
         for index, question in enumerate(questions):
@@ -293,33 +294,20 @@ def run(args):
                 raise ValueError('Unsafe or missing business directory')
             with (output / 'logs' / f'{index:06}.jsonl').open('w', encoding='utf-8') as events:
                 started = time.monotonic()
-                measurements = {'model_calls': 0, 'model_seconds': 0.0, 'worker_start_seconds': 0.0,
-                                'execution_seconds': 0.0, 'file_read_seconds': 0.0, 'cache_hits': 0,
-                                'errors': [], 'input_tokens': 0, 'output_tokens': 0, 'retries': 0}
-                pending_repair = [False]
+                measurements = {'model_calls': 0, 'model_seconds': 0.0, 'errors': [], 'input_tokens': 0,
+                                'output_tokens': 0}
                 def emit(event):
                     """Save one event and update the current question's measurements.
 
                     Args:
-                        event: JSON-serializable event dictionary with a stage, and timing,
-                            memory, code or observation fields appropriate to that stage.
+                        event: JSON-serializable event dictionary with a stage (schema,
+                            memory_step, sql, observation or question_timing) and its fields.
 
                     Returns:
-                        None. Mutates captured measurements/repair state and immediately
-                        flushes the event to the current question's open JSONL log.
+                        None. Adds reported token usage to the captured measurements and
+                        immediately flushes the event to the current question's open JSONL log.
                     """
-                    if event.get('stage') == 'timing':
-                        operation = event.get('operation')
-                        if operation in ('worker_start', 'execution'):
-                            measurements[operation + '_seconds'] += event.get('seconds', 0)
-                        for tool in event.get('tools', []):
-                            if tool.get('tool') in ('read_table', 'read_workbook'):
-                                measurements['file_read_seconds'] += tool.get('seconds', 0)
-                                measurements['cache_hits'] += int(tool.get('cache_hit', False))
                     if event.get('stage') == 'memory_step':
-                        if event.get('error'):
-                            measurements['errors'].append(event['error'].get('type', 'error'))
-                            pending_repair[0] = True
                         usage = event.get('token_usage') or {}
                         for key in ('input_tokens', 'output_tokens'):
                             measurements[key] += usage.get(key) or 0
@@ -327,7 +315,7 @@ def run(args):
                     events.flush()
                 original_generate = getattr(model, 'generate', None)
                 def timed_generate(*call_args, **call_kwargs):
-                    """Wrap the original model call with timing, error and retry accounting.
+                    """Wrap the original model call with timing and error accounting.
 
                     Args:
                         *call_args: Positional arguments forwarded to the original generate.
@@ -341,9 +329,6 @@ def run(args):
                         Exception: The underlying generation error is recorded and re-raised.
                     """
                     model_start = time.monotonic()
-                    if pending_repair[0]:
-                        measurements['retries'] += 1
-                        pending_repair[0] = False
                     measurements['model_calls'] += 1
                     try:
                         return original_generate(*call_args, **call_kwargs)
@@ -358,27 +343,11 @@ def run(args):
                 try:
                     budget = min(args.question_timeout, remaining, 60)
                     with time_limit(budget):
-                      if bundles is not None:
                         if question['business_id'] not in bundles:
                             answer = {'type': 'abstain', 'reason': 'No prepared data for this business.'}
                         else:
                             answer = answer_question_sql(model, question, business, bundles[question['business_id']],
                                                          rulebook, max_steps=min(args.max_steps, 6), emit=emit)
-                      else:
-                        preview_start = time.monotonic()
-                        files = sorted(p for p in business.rglob('*') if p.is_file())
-                        cache_key = (str(business), tuple((str(p.relative_to(business)), p.stat().st_size,
-                                                           p.stat().st_mtime_ns) for p in files))
-                        cache_hit = cache_key in previews
-                        if not cache_hit:
-                            previews[cache_key] = source_preview(business, split / 'calendar.csv', min(args.exec_timeout, budget), preview_rows=4)
-                        measurements['preview_seconds'] = time.monotonic() - preview_start
-                        measurements['preview_cache_hit'] = cache_hit
-                        emit({'stage': 'source_preview', 'text': previews[cache_key]})
-                        answer = answer_question(model, question, business, split / 'calendar.csv', rulebook,
-                                                 max_steps=min(args.max_steps, 4),
-                                                 action_seconds=min(args.exec_timeout, budget), emit=emit,
-                                                 source_summary=previews[cache_key])
                 except QuestionDeadlineExceeded:
                     answer = {'type': 'abstain', 'reason': 'Question deadline exceeded'}
                 except Exception as error:

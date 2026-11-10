@@ -1,4 +1,4 @@
-"""Local interface for running and inspecting tabular-agent questions."""
+"""Local interface for running questions with SQL over prepared bundles and inspecting the queries."""
 from datetime import datetime
 import json
 import os
@@ -42,14 +42,14 @@ def prepared_root_for(business_id):
 
 st.set_page_config(page_title='Agent test lab', page_icon='🔎', layout='wide')
 st.title('Agent test lab')
-st.caption('Choose questions, run the agent, and inspect its actions.')
+st.caption('Choose questions, answer them with SQL over the prepared bundles, and inspect each query and result.')
 
 split = st.text_input('Dataset directory', value='data/train')
 provider = st.radio('Model provider', ['Local server', 'OpenAI API'], horizontal=True)
 if provider == 'OpenAI API':
     model = st.text_input('OpenAI model name', value=openai_model_name())
     base_url = None
-    st.info('OpenAI receives the question, business instructions, generated code and observations. API usage is billed separately and is unsuitable for offline-only evaluation.')
+    st.info('OpenAI receives the question, rulebook, business README, bundle schema, generated queries and their results. API usage is billed separately and is unsuitable for offline-only evaluation.')
     if not openai_api_key():
         st.warning('Set OPENAI_API_KEY in your environment or local .env file before running.')
 else:
@@ -91,21 +91,18 @@ if not businesses:
     st.stop()
 
 business = st.selectbox('Business', businesses)
-use_sql = st.checkbox('Answer with SQL over prepared bundles (benchmark settings)', value=True,
-                      help='Same answering mode as the frozen-set runs: temperature 0, up to six steps.')
-prepared = prepared_root_for(business) if use_sql else None
-if use_sql:
-    if prepared:
-        st.caption(f'Prepared bundles: {prepared} · temperature 0 · max 6 steps')
-    else:
-        st.warning(f'No prepared bundle for {business} in: {", ".join(PREPARED_ROOTS)}. Run make prepare first.')
+prepared = prepared_root_for(business)
+if prepared:
+    st.caption(f'Prepared bundles: {prepared} · temperature 0 · max 6 steps (the benchmark settings)')
+else:
+    st.warning(f'No prepared bundle for {business} in: {", ".join(PREPARED_ROOTS)}. Run make prepare first.')
 business_questions = {q['id']: q for q in questions if q.get('business_id') == business}
 chosen = st.multiselect(
     'Questions', list(business_questions),
     format_func=lambda key: f"{key} — {business_questions[key]['question']}",
     key=f'questions:{Path(split).resolve()}:{business}',
 )
-if st.button('Run selected questions', disabled=not chosen or (use_sql and not prepared)):
+if st.button('Run selected questions', disabled=not chosen or not prepared):
     root = Path('runs') / ('ui-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
     command = [sys.executable, '-m', 'tabular_agent.cli',
                'bench' if (Path(split) / 'answers.jsonl').is_file() else 'predict',
@@ -113,8 +110,7 @@ if st.button('Run selected questions', disabled=not chosen or (use_sql and not p
                '--provider', 'openai' if provider == 'OpenAI API' else 'local', '--model', model]
     if base_url:
         command.extend(['--base-url', base_url])
-    if use_sql:
-        command.extend(['--prepared', prepared, *BENCH_ARGS])
+    command.extend(['--prepared', prepared, *BENCH_ARGS])
     for question_id in chosen:
         command.extend(['--question-id', question_id])
     if telemetry:
@@ -125,7 +121,7 @@ if st.button('Run selected questions', disabled=not chosen or (use_sql and not p
 
 @st.fragment(run_every=2)
 def show_run():
-    """Refresh the selected run's progress, results and recorded agent actions.
+    """Refresh the selected run's progress, results and recorded queries.
 
     Returns:
         None. Reads the run job from Streamlit session state and displays
@@ -161,8 +157,7 @@ def show_run():
                 measurements = next((item for item in json.loads(timing_file.read_text(encoding='utf-8'))
                                      if item['id'] == row['id']), None)
                 if measurements:
-                    st.caption(f"{measurements['seconds']:.2f}s · {measurements['model_calls']} model calls · "
-                               f"{measurements['retries']} retries")
+                    st.caption(f"{measurements['seconds']:.2f}s · {measurements['model_calls']} model calls")
     report = path / 'score.json'
     if report.exists():
         st.subheader('Internal score')
@@ -185,21 +180,14 @@ def show_run():
                     item = json.loads(line)
                     if item.get('stage') == 'sql':
                         st.code(item['sql'], language='sql')
-                    elif item.get('stage') == 'code':
-                        st.code(item['code'], language='python')
                     elif item.get('stage') == 'memory_step':
-                        st.markdown(f"**Agent · step {item['step']}**")
+                        st.markdown(f"**Model · step {item['step']}**")
                         if item.get('token_usage'):
                             st.caption(f"Reported model token usage: {item['token_usage']}")
                         if item.get('model_output'):
                             st.text(item['model_output'])
-                        if item.get('tool_calls'):
-                            st.caption('Tool calls')
-                            st.json(item['tool_calls'])
-                        if item.get('error'):
-                            st.error(str(item['error']))
-                        st.caption('Messages in smolagents memory before this step')
-                        st.json(item.get('model_input_messages') or [], expanded=False)
+                    elif item.get('stage') == 'question_timing':
+                        st.caption(f"Final answer: {json.dumps(item.get('answer'), ensure_ascii=False)}")
                     else:
                         st.text(item.get('text', ''))
 
