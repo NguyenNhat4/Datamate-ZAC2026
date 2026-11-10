@@ -33,7 +33,8 @@ _PHRASES = tuple((re.compile(r'\b' + pattern + r'\b'), word) for pattern, word i
     ('lien tuc', 'lientuc'), ('lien tiep', 'lientiep'), ('lien nhau', 'liennhau'), ('thoi gian', 'thoigian'),
     ('thu tu', 'thutu'), ('liet ke', 'lietke'), ('best seller', 'chay'), ('xuat hien', 'xuathien'),
     ('khac nhau', 'khacnhau'), ('ke tu', 'ketu'), ('tang gia', 'tanggia'), ('len gia', 'tanggia'), ('doi gia', 'tanggia'),
-    ('ngay truoc', 'ngaytruoc'), ('ti trong', 'titrong'), ('dien thoai', 'chphone'), ('tai quay', 'chstore'), ('zalo oa', 'chzalo'),
+    ('ngay truoc', 'ngaytruoc'), ('ti trong', 'titrong'), ('trung thanh', 'trungthanh'), ('doi y', 'doiy'),
+    ('ua chuong', 'uuchuong'), ('dat khach', 'datkhach'), ('cao diem', 'caodiem'), ('dien thoai', 'chphone'), ('tai quay', 'chstore'), ('zalo oa', 'chzalo'),
     ('tien mat', 'pcash'), ('chuyen khoan', 'ptransfer'), ('vi dien tu', 'pewallet')))
 
 # "mặt hàng ế" (unsold); a lone "e" is otherwise "em".

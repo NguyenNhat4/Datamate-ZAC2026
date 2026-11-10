@@ -70,7 +70,7 @@ def intent(name, words, need, periods=(1, 1), numbers=(0, 0), entities=(), optio
 
 
 # Words that only occur inside the joined phrases of text._PHRASES; known so that typing variants of them are repaired.
-PHRASE_PARTS = frozenset('dien thoai tai quay zalo oa tien mat chuyen khoan vi tu xuat hien it lan luot ca sang chieu'.split())
+PHRASE_PARTS = frozenset('dien thoai tai quay zalo oa tien mat chuyen khoan vi tu xuat hien it lan luot ca sang chieu trung thanh doi y ua chuong dat khach cao diem'.split())
 
 
 def known_words():
@@ -263,6 +263,8 @@ def comparison_periods(parsed):
     year_ago = 'cungky' in words and 'nam' in words and bool({'truoc', 'ngoai', 'roi'} & set(words))
     named = [(m, a) for m, a in zip(mentions, after_against) if m.kind != 'last_month']
     cue_months = [m for m in mentions if m.kind == 'last_month']
+    if len(mentions) == 2 and sum(m.base for m in mentions) == 1:
+        return (next(m for m in mentions if not m.base), next(m for m in mentions if m.base))
     if len(named) == 1 and len(mentions) <= 2:
         asked = named[0][0]
         if cue_months and asked.kind not in ('month', 'this_month', 'month_to_date', 'quarter'):
@@ -278,7 +280,7 @@ def comparison_periods(parsed):
 
 
 @intent('revenue_change', 'doanhthu tang giam hay thay doi sovoi so hon kem chenh phantram truong thang truoc lientruoc '
-        'truocdo cungky nam ngoai roi mot nhieu tong cuahang',
+        'truocdo cungky nam ngoai roi mot nhieu tong cuahang dip am lich ngay truoc',
         lambda w, p: 'doanhthu' in w and 'phantram' in w and bool({'tang', 'giam', 'thay', 'hon', 'kem', 'chenh', 'truong'} & w),
         periods=(1, 3))
 def run_revenue_change(ctx, parsed):
@@ -930,6 +932,130 @@ run_channel = _order_group(_CHANNELS, 'channel', 'channel_revenue', 'channel')
 run_payment = _order_group(_PAYMENTS, 'payment_method', 'payment_revenue', 'payment')
 
 
+# ---- rankings the split's rulebook defines by name -------------------------------------------------------------------
+# Defined terms of the public rulebook (section 3): the loyal customer has the most days with a purchase, the big
+# spender the highest average order among customers with at least 3 orders, the fickle customer the most cancelled
+# orders, the favourite product is in the most orders, the busiest day has the most orders, the peak hour is the
+# whole hour of order time with the most orders (answered by its starting hour). Ties go to the lower code.
+
+_RANK_WORDS = 'khach hang ai la nhat trong cho cuahang nao mat cua'
+
+
+def _customer_winner(ctx, sql, period, *args):
+    row = ctx.one(sql, period.first, period.last, *args)
+    return None if row is None or row[0] is None else {'type': 'string', 'answer': row[0]}
+
+
+@intent('loyal_customer', _RANK_WORDS + ' trungthanh', lambda w, p: 'trungthanh' in w and bool({'khach', 'ai'} & w))
+def run_loyal_customer(ctx, parsed):
+    period = _one_period(parsed)
+    if no_customers(ctx):
+        return unanswerable(NOT_RECORDED)
+    if customer_amount(ctx) is None:
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    return _customer_winner(ctx, 'SELECT MIN(customer_name) FROM semantic.eligible_orders WHERE customer_key IS NOT NULL '
+                                 'AND CAST(order_date AS DATE) BETWEEN ? AND ? GROUP BY customer_key '
+                                 'ORDER BY COUNT(DISTINCT CAST(order_date AS DATE)) DESC, customer_key LIMIT 1', period)
+
+
+@intent('big_spender', _RANK_WORDS + ' sop', lambda w, p: 'sop' in w and bool({'khach', 'ai'} & w))
+def run_big_spender(ctx, parsed):
+    period, amount = _one_period(parsed), customer_amount(ctx)
+    if no_customers(ctx):
+        return unanswerable(NOT_RECORDED)
+    if amount is None:
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    return _customer_winner(ctx, 'SELECT MIN(customer_name) FROM semantic.eligible_orders WHERE customer_key IS NOT NULL '
+                                 'AND CAST(order_date AS DATE) BETWEEN ? AND ? GROUP BY customer_key HAVING COUNT(*) >= 3 '
+                                 f'ORDER BY SUM({amount})::DOUBLE / COUNT(*) DESC, customer_key LIMIT 1', period)
+
+
+@intent('fickle_customer', _RANK_WORDS + ' doiy hay', lambda w, p: 'doiy' in w and bool({'khach', 'ai'} & w))
+def run_fickle_customer(ctx, parsed):
+    period = _one_period(parsed)
+    if not ctx.has('semantic.orders', 'customer_key', 'customer_name', 'order_state', 'order_date'):
+        return unanswerable(NOT_RECORDED) if no_customers(ctx) else None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    return _customer_winner(ctx, "SELECT MIN(customer_name) FROM semantic.orders WHERE customer_key IS NOT NULL "
+                                 "AND order_state = 'cancelled' AND CAST(order_date AS DATE) BETWEEN ? AND ? "
+                                 'GROUP BY customer_key ORDER BY COUNT(*) DESC, customer_key LIMIT 1', period)
+
+
+@intent('favourite_product', _RANK_WORDS + ' uuchuong mathang',
+        lambda w, p: 'uuchuong' in w and 'mathang' in w)
+def run_favourite_product(ctx, parsed):
+    period = _one_period(parsed)
+    if not ctx.has('semantic.eligible_sales_lines', 'order_id', 'product_name', 'order_date'):
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    code = 'product_id' if ctx.has('semantic.eligible_sales_lines', 'product_id') else 'product_name'
+    row = ctx.one(f"SELECT MIN(product_name) FROM semantic.eligible_sales_lines WHERE product_name IS NOT NULL "
+                  "AND lower(strip_accents(product_name)) <> 'phi phuc vu' AND CAST(order_date AS DATE) BETWEEN ? AND ? "
+                  f'GROUP BY {code} ORDER BY COUNT(DISTINCT order_id) DESC, {code} LIMIT 1', period.first, period.last)
+    return {'type': 'string', 'answer': row[0]} if row and row[0] else None
+
+
+@intent('busiest_day', _RANK_WORDS + ' ngay datkhach', lambda w, p: 'datkhach' in w and 'ngay' in w)
+def run_busiest_day(ctx, parsed):
+    period = _one_period(parsed)
+    if not ctx.has('semantic.eligible_orders', 'order_date'):
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    row = ctx.one('SELECT CAST(order_date AS DATE) FROM semantic.eligible_orders '
+                  'WHERE CAST(order_date AS DATE) BETWEEN ? AND ? GROUP BY 1 ORDER BY COUNT(*) DESC, 1 LIMIT 1',
+                  period.first, period.last)
+    return {'type': 'date', 'answer': row[0].isoformat()} if row else None
+
+
+@intent('peak_hour', _RANK_WORDS + ' gio caodiem', lambda w, p: 'caodiem' in w and 'gio' in w)
+def run_peak_hour(ctx, parsed):
+    period = _one_period(parsed)
+    if not ctx.has('semantic.eligible_orders', 'order_date', 'created_at'):
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    row = ctx.one('SELECT hour(created_at) FROM semantic.eligible_orders WHERE created_at IS NOT NULL '
+                  'AND CAST(order_date AS DATE) BETWEEN ? AND ? GROUP BY 1 ORDER BY COUNT(*) DESC, 1 LIMIT 1',
+                  period.first, period.last)
+    return number(row[0]) if row else None
+
+
+def resolve_tet(ctx, parsed):
+    """Give the Tết periods of a parsed question explicit dates from the bundle's lunar calendar.
+
+    Returns:
+        The Parsed with tet and tet_before periods replaced by ranges, the same Parsed when it has none, or None when
+        the calendar is missing, a Tết is not in it, or "N days before Tết" does not span the length of that Tết.
+    """
+    if not any(p.kind in ('tet', 'tet_before') for p in parsed.periods):
+        return parsed
+    if not ctx.has('clean.calendar', 'date', 'lunar_day', 'lunar_month', 'lunar_year', 'lunar_leap'):
+        return None
+    tets = [P.tet_range(ctx.connection, p.year) if p.kind == 'tet' else None for p in parsed.periods]
+    resolved = []
+    for period, span in zip(parsed.periods, tets):
+        if period.kind == 'tet':
+            if span is None:
+                return None
+            resolved.append(P.Period('range', span[0], span[1]))
+        elif period.kind == 'tet_before':
+            owners = [s for s in tets if s]
+            if len(owners) != 1 or period.days != (owners[0][1] - owners[0][0]).days + 1:
+                return None
+            resolved.append(P.Period('range', owners[0][0] - timedelta(days=period.days),
+                                     owners[0][0] - timedelta(days=1), base=True))
+        else:
+            resolved.append(period)
+    return Parsed(parsed.question, parsed.today, parsed.words, resolved, parsed.numbers, parsed.next_word, parsed.entities)
+
+
 def answer(question, as_of_date, ctx):
     """Answer a question by the first intent that explains it.
 
@@ -943,6 +1069,8 @@ def answer(question, as_of_date, ctx):
     named = analyze(question, as_of_date, ctx.catalog) if (ctx.catalog.products or ctx.catalog.groups or ctx.catalog.units) else None
     for item in INTENTS:
         parsed = named if item.entities else plain
+        if parsed is not None and any(p.kind in ('tet', 'tet_before') for p in parsed.periods):
+            parsed = resolve_tet(ctx, parsed)
         if parsed is None:
             continue
         words = set(parsed.words)

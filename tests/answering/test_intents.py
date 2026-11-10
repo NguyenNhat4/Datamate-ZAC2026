@@ -18,14 +18,15 @@ def make_bundle(root):
     con.execute('CREATE SCHEMA semantic')
     con.execute('CREATE SCHEMA clean')
     con.execute("""CREATE TABLE semantic.orders AS SELECT * FROM (VALUES
-        ('o1', DATE '2026-03-02', 'completed', 100000, 'c1', 'An', FALSE, FALSE, TRUE),
-        ('o2', DATE '2026-03-02', 'completed', 50000, 'c1', 'An', FALSE, FALSE, TRUE),
-        ('o3', DATE '2026-03-05', 'cancelled', 70000, 'c2', 'Bình', TRUE, FALSE, FALSE),
-        ('o4', DATE '2026-03-10', 'completed', 200000, 'c2', 'Bình', FALSE, FALSE, TRUE),
-        ('o5', DATE '2026-03-19', 'completed', 30000, NULL, NULL, FALSE, FALSE, TRUE),
-        ('o6', DATE '2026-02-10', 'completed', 100000, 'c1', 'An', FALSE, FALSE, TRUE),
-        ('o7', DATE '2026-02-11', 'returned', 60000, 'c2', 'Bình', FALSE, TRUE, FALSE))
-        t(order_id, order_date, order_state, revenue, customer_key, customer_name, cancelled, returned, counts_as_sale)""")
+        ('o1', DATE '2026-03-02', TIMESTAMP '2026-03-02 08:30:00', 'completed', 100000, 'c1', 'An', FALSE, FALSE, TRUE),
+        ('o2', DATE '2026-03-02', TIMESTAMP '2026-03-02 15:10:00', 'completed', 50000, 'c1', 'An', FALSE, FALSE, TRUE),
+        ('o3', DATE '2026-03-05', TIMESTAMP '2026-03-05 09:00:00', 'cancelled', 70000, 'c2', 'Bình', TRUE, FALSE, FALSE),
+        ('o4', DATE '2026-03-10', TIMESTAMP '2026-03-10 08:45:00', 'completed', 200000, 'c2', 'Bình', FALSE, FALSE, TRUE),
+        ('o5', DATE '2026-03-19', TIMESTAMP '2026-03-19 09:05:00', 'completed', 30000, NULL, NULL, FALSE, FALSE, TRUE),
+        ('o6', DATE '2026-02-10', TIMESTAMP '2026-02-10 10:00:00', 'completed', 100000, 'c1', 'An', FALSE, FALSE, TRUE),
+        ('o7', DATE '2026-02-11', TIMESTAMP '2026-02-11 10:00:00', 'returned', 60000, 'c2', 'Bình', FALSE, TRUE, FALSE))
+        t(order_id, order_date, created_at, order_state, revenue, customer_key, customer_name, cancelled, returned,
+          counts_as_sale)""")
     con.execute('CREATE VIEW semantic.eligible_orders AS SELECT * FROM semantic.orders WHERE counts_as_sale')
     con.execute("""CREATE TABLE semantic.eligible_sales_lines AS SELECT * FROM (VALUES
         ('o1', DATE '2026-03-02', 'Cà phê sữa (M)', 2, 2, 'ly', 60000),
@@ -42,10 +43,10 @@ def make_bundle(root):
         return {'name': name, 'grain': 'order', 'columns': [{'name': c, 'type': 'VARCHAR'} for c in columns], **extra}
 
     schema = {'relations': [
-        relation('semantic.orders', ['order_id', 'order_date', 'order_state', 'revenue', 'customer_key', 'customer_name',
-                                     'cancelled', 'returned', 'counts_as_sale']),
-        relation('semantic.eligible_orders', ['order_id', 'order_date', 'order_state', 'revenue', 'customer_key',
-                                              'customer_name', 'cancelled', 'returned', 'counts_as_sale']),
+        relation('semantic.orders', ['order_id', 'order_date', 'created_at', 'order_state', 'revenue', 'customer_key',
+                                     'customer_name', 'cancelled', 'returned', 'counts_as_sale']),
+        relation('semantic.eligible_orders', ['order_id', 'order_date', 'created_at', 'order_state', 'revenue',
+                                              'customer_key', 'customer_name', 'cancelled', 'returned', 'counts_as_sale']),
         relation('semantic.eligible_sales_lines', ['order_id', 'order_date', 'product_name', 'quantity', 'base_quantity',
                                                    'base_unit', 'line_amount']),
         relation('semantic.product_quantities', ['order_id', 'order_date', 'product_name', 'quantity', 'base_quantity',
@@ -149,6 +150,16 @@ class FixedQueries(unittest.TestCase):
         self.assertEqual(self.ask('doanh thu của Cà phê sữa (M) tháng 3/2026')[1]['answer'], 140000)
         self.assertEqual(self.ask('tháng 3/2026 bán được bao nhiêu ly Cà phê sữa (M)')[1]['answer'], 5)
         self.assertEqual(self.ask('tháng 3/2026 quán bán được bao nhiêu ly size L, cộng mọi món')[1]['answer'], 5)
+
+    def test_rankings_defined_by_name_in_the_rulebook(self):
+        self.assertEqual(self.ask('ngày đắt khách nhất tháng 3/2026 là ngày nào')[1], {'type': 'date', 'answer': '2026-03-02'})
+        self.assertEqual(self.ask('giờ cao điểm tháng 3/2026 là mấy giờ')[1], {'type': 'number', 'answer': 8})
+        self.assertEqual(self.ask('khách hay đổi ý nhất tháng 3/2026 là ai')[1], {'type': 'string', 'answer': 'Bình'})
+        self.assertEqual(self.ask('mặt hàng được ưa chuộng nhất tháng 3/2026')[1], {'type': 'string', 'answer': 'Cà phê sữa (M)'})
+        # Customers tie on 1 day with a purchase (the cancelled order is not a purchase); the lower code wins.
+        self.assertEqual(self.ask('khách trung thành nhất tháng 3/2026')[1], {'type': 'string', 'answer': 'An'})
+        # Nobody has three orders in the month, so there is no big spender to name.
+        self.assertIsNone(self.ask('khách sộp nhất tháng 3/2026'))
 
     def test_a_period_outside_the_data_is_unanswerable_not_zero(self):
         self.assertEqual(self.ask('doanh thu tháng 1/2026 là bao nhiêu')[1]['type'], 'unanswerable')

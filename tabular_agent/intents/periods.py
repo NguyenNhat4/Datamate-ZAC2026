@@ -14,7 +14,7 @@ from datetime import date, timedelta
 
 # Canonical words the patterns below are written in; text.canonical() maps typing variants onto them.
 WORDS = frozenset('''thang nam quy tuan ngay hom nay qua truoc roi dau den toi het tu gan nhat vua lien cung ky do giai
-doan tinh'''.split())
+doan tinh tet dip am lich ngoai'''.split())
 
 _DATE = r'(?:ngay )?(\d{1,2})/(\d{1,2})/(\d{4})'
 
@@ -25,15 +25,21 @@ class Period:
 
     Attributes:
         kind: day, week, month, quarter, month_to_date, year_to_date, last_days, range, this_month, last_month,
-            this_quarter, last_quarter or this_week.
+            this_quarter, last_quarter or this_week; tet and tet_before until the bundle's lunar calendar resolves them.
         first: First day, inclusive.
         last: Last day, inclusive.
         year_given: True when the question stated the year.
+        year: For tet, the solar year of the Tết (its dates are looked up in the calendar).
+        days: For tet_before, how many days before the Tết the period spans.
+        base: True for a period the question names as the base of a comparison.
     """
     kind: str
     first: date
     last: date
     year_given: bool = True
+    year: int = 0
+    days: int = 0
+    base: bool = False
 
 
 def month_range(year, month):
@@ -107,6 +113,13 @@ def extract(text, as_of_date):
         a, b = _valid_date(m[1], m[2], m[3]), _valid_date(m[4], m[5], m[6])
         return Period('range', a, b) if a and b and a <= b else False
 
+    pattern(r'(\d{1,3}) (?:ngay (?:ngay )?truoc|ngaytruoc) tet',
+            lambda m: Period('tet_before', today, today, days=int(m[1]), base=True) if int(m[1]) else False)
+    pattern(r'(?:dip )?tet(?: am lich)? (?:nam )?(20\d\d)',
+            lambda m: Period('tet', date(int(m[1]), 1, 1), date(int(m[1]), 12, 31), year=int(m[1])))
+    pattern(r'(?:dip )?tet(?: am lich)? nam (nay|ngoai|truoc|roi)',
+            lambda m: Period('tet', date(today.year - (m[1] != 'nay'), 1, 1), date(today.year - (m[1] != 'nay'), 12, 31),
+                             year=today.year - (m[1] != 'nay')))
     pattern(r'(?:giai doan )?tu ' + _DATE + r' (?:den|toi) (?:het )?' + _DATE, date_range)
     pattern(r'(?:nam nay )?(?:tinh )?tu (?:dau nam|(?:ngay )?1/1(?: nam nay)?)(?: (?:den|toi)(?: het)?(?: (?:hom nay|nay))?)?',
             lambda m: Period('year_to_date', date(today.year, 1, 1), today))
@@ -152,6 +165,23 @@ def extract(text, as_of_date):
     pieces.append(text[position:])
     masked = re.sub(r'\s+', ' ', ''.join(pieces).replace('@t', ' @t ')).strip()
     return masked, [period for _, _, period in found]
+
+
+def tet_range(connection, year):
+    """First and last solar day of the Tết of a year: lunar 23/12 of the year before to lunar 10/1, inclusive.
+
+    Args:
+        connection: DuckDB connection to a bundle that holds clean.calendar (date and lunar fields).
+        year: Solar year of the Tết.
+
+    Returns:
+        (first, last) dates, or None when the calendar does not hold both days.
+    """
+    row = connection.execute(
+        'SELECT MIN(date) FILTER (WHERE lunar_year = ? AND lunar_month = 12 AND lunar_day = 23 AND NOT lunar_leap), '
+        'MAX(date) FILTER (WHERE lunar_year = ? AND lunar_month = 1 AND lunar_day = 10 AND NOT lunar_leap) '
+        'FROM clean.calendar', [year - 1, year]).fetchone()
+    return (row[0], row[1]) if row and row[0] and row[1] else None
 
 
 def base_of(asked, today, year_ago=False):
