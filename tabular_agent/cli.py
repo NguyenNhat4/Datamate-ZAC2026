@@ -66,11 +66,13 @@ def time_limit(seconds):
         signal.signal(signal.SIGALRM, previous)
 
 
-def answer_by_intent(contexts, bundles, question, emit):
+def answer_by_intent(catalogs, bundles, question, emit):
     """Answer a question with a deterministic intent when one claims it.
 
     Args:
-        contexts: Dictionary of opened intents.Context objects by business id; filled on demand.
+        catalogs: Dictionary of entity catalogues by business id, filled on first use. Only these are kept between
+            questions: the bundle is opened for the attempt and closed before the model may open it, because DuckDB
+            shares one locked database instance among the connections of a process.
         bundles: Mapping from business id to its prepared bundle directory.
         question: Question record with business_id, question and as_of_date.
         emit: Event callback; receives an intent event for a claimed question, or an intent_error event.
@@ -79,11 +81,13 @@ def answer_by_intent(contexts, bundles, question, emit):
         A validated answer dictionary, or None when no intent claims the question, the claimed intent cannot answer
         from this bundle, or the layer failed. None leaves the question to the model; a failure never stops the run.
     """
+    business, context = question['business_id'], None
     try:
-        business = question['business_id']
-        if business not in contexts:
-            contexts[business] = IntentContext(bundles[business])
-        hit = intent_answer(question['question'], question['as_of_date'], contexts[business])
+        context = IntentContext(bundles[business])
+        if business in catalogs:
+            context.catalog = catalogs[business]
+        hit = intent_answer(question['question'], question['as_of_date'], context)
+        catalogs[business] = context.catalog
         if hit is None:
             return None
         result, name = hit
@@ -91,6 +95,9 @@ def answer_by_intent(contexts, bundles, question, emit):
     except Exception as error:
         emit({'stage': 'intent_error', 'error': f'{type(error).__name__}: {error}'})
         return None
+    finally:
+        if context is not None:
+            context.close()
     emit({'stage': 'intent', 'intent': name, 'answer': answer})
     return answer
 
@@ -314,7 +321,7 @@ def run(args):
     (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     rulebook = (split / 'rulebook.md').read_text(encoding='utf-8')
     bundles = find_bundles(args.prepared)
-    contexts = {}
+    catalogs = {}
     predictions = []
     timings = []
     stop_at = time.monotonic() + args.run_timeout
@@ -381,7 +388,7 @@ def run(args):
                         if question['business_id'] not in bundles:
                             answer = {'type': 'abstain', 'reason': 'No prepared data for this business.'}
                         else:
-                            answer = None if args.no_intents else answer_by_intent(contexts, bundles, question, emit)
+                            answer = None if args.no_intents else answer_by_intent(catalogs, bundles, question, emit)
                             if answer is None:
                                 answer = answer_question_sql(model, question, business, bundles[question['business_id']],
                                                              rulebook, max_steps=min(args.max_steps, 6), emit=emit)
@@ -403,8 +410,6 @@ def run(args):
             submission.flush()
             os.fsync(submission.fileno())
             print(f"[{index+1}/{len(questions)}] {question['id']}: {row['type']}", flush=True)
-    for context in contexts.values():
-        context.close()
     if args.command == 'bench':
         report = score(questions, predictions, read_jsonl(split / 'answers.jsonl'))
         (output / 'score.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

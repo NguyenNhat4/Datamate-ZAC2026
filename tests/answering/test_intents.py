@@ -54,6 +54,56 @@ def make_bundle(root):
     (Path(root) / 'schema.json').write_text(json.dumps(schema), encoding='utf-8')
 
 
+class Scripted:
+    """A model that replies with prepared texts."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+
+    def generate(self, messages, **kwargs):
+        from types import SimpleNamespace
+        return SimpleNamespace(content=self.replies.pop(0), token_usage=None)
+
+
+class WithTheModelPath(unittest.TestCase):
+    def test_the_model_can_open_a_bundle_after_an_intent_attempt_on_it(self):
+        """DuckDB shares one locked instance per file in a process: the attempt must leave the file closed."""
+        from unittest.mock import patch
+        from tabular_agent.cli import answer_by_intent
+        from tabular_agent.sql_agent import answer_question_sql
+        opened = []
+
+        class Tracked(Context):
+            def __init__(self, bundle):
+                super().__init__(bundle)
+                self.closed = False
+                opened.append(self)
+
+            def close(self):
+                self.closed = True
+                super().close()
+
+        with tempfile.TemporaryDirectory() as tmp, patch('tabular_agent.cli.IntentContext', Tracked):
+            bundle, business = Path(tmp) / 'bundle', Path(tmp) / 'business'
+            bundle.mkdir()
+            business.mkdir()
+            make_bundle(bundle)
+            catalogs, events = {}, []
+            asked = {'id': 'q', 'business_id': 'shop', 'question': 'doanh thu tháng 3/2026', 'as_of_date': '2026-03-20'}
+            for _ in range(2):  # the second round reuses the cached catalogue
+                answer = answer_by_intent(catalogs, {'shop': bundle}, asked, events.append)
+                self.assertEqual(answer, {'type': 'number', 'answer': 380000})
+                open_ended = {**asked, 'question': 'doanh thu tháng 3/2026 của khách vip'}
+                self.assertIsNone(answer_by_intent(catalogs, {'shop': bundle}, open_ended, events.append))
+                reply = answer_question_sql(Scripted('```json\n{"type": "abstain"}\n```'), open_ended, business, bundle,
+                                            'Rules.', max_steps=2)
+                self.assertEqual(reply['type'], 'abstain')
+            self.assertEqual([e['stage'] for e in events], ['intent', 'intent'])
+            self.assertEqual(events[0]['intent'], 'revenue')
+            self.assertEqual(len(opened), 4)
+            self.assertTrue(all(c.closed for c in opened), 'an intent attempt left the bundle open')
+
+
 class TextRepair(unittest.TestCase):
     def test_telex_residue_is_removed(self):
         self.assertEqual(collapse('ddown'), 'don')

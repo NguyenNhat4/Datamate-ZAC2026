@@ -45,6 +45,7 @@ class Intent:
         numbers: Allowed (min, max) number of number slots.
         entities: Kinds of catalogue names the question must contain, exactly (product, group, unit, size, customer).
         optional: Kinds that may also occur, any number of times (they are ignored).
+        repeat: True when the same period may be named twice ("tháng 3, trong tổng doanh thu tháng 3") and counts once.
         run: Executor (Context, Parsed) -> answer dict or None. None means "cannot answer here": the model is asked.
     """
     name: str
@@ -54,23 +55,24 @@ class Intent:
     numbers: tuple
     entities: tuple
     optional: tuple
+    repeat: bool
     run: Callable
 
 
 INTENTS = []
 
 
-def intent(name, words, need, periods=(1, 1), numbers=(0, 0), entities=(), optional=()):
+def intent(name, words, need, periods=(1, 1), numbers=(0, 0), entities=(), optional=(), repeat=False):
     """Register an intent; decorates its executor."""
     def register(run):
         INTENTS.append(Intent(name, frozenset(words.split()), need, periods, numbers, tuple(sorted(entities)),
-                              tuple(optional), run))
+                              tuple(optional), repeat, run))
         return run
     return register
 
 
 # Words that only occur inside the joined phrases of text._PHRASES; known so that typing variants of them are repaired.
-PHRASE_PARTS = frozenset('dien thoai tai quay zalo oa tien mat chuyen khoan vi tu xuat hien it lan luot ca sang chieu trung thanh doi y ua chuong dat khach cao diem'.split())
+PHRASE_PARTS = frozenset('dien thoai tai quay zalo oa tien mat chuyen khoan vi tu xuat hien it lan luot ca sang chieu trung binh phan tram tro len trung thanh doi y ua chuong dat khach cao diem'.split())
 
 
 def known_words():
@@ -314,17 +316,18 @@ def month_list(parsed):
         return [P.month_range(*divmod(last.year * 12 + last.month - 1 - i, 12)[:1] +
                               (divmod(last.year * 12 + last.month - 1 - i, 12)[1] + 1,))
                 for i in range(int(parsed.numbers[0]) - 1, -1, -1)]
-    if len(months) == 2 and 'tu' in words and bool({'den', 'toi'} & set(words)) and 'ketthuc' not in words:
+    if len(months) == 2 and 'tu' in words and bool({'den', 'toi'} & set(words)) and 'ketthuc' not in words and 'qua' not in words:
         a, b = months[0].first, months[1].first
         if a >= b:
             return None
         span = (b.year - a.year) * 12 + b.month - a.month
         return [P.month_range(*divmod(a.year * 12 + a.month - 1 + i, 12)[:1] + (divmod(a.year * 12 + a.month - 1 + i, 12)[1] + 1,))
                 for i in range(span + 1)]
-    if len(months) >= 2 and 'tu' not in words and len(parsed.numbers) <= 1:
-        if parsed.numbers and parsed.numbers[0] != len(months):
+    unique = list(dict.fromkeys((m.first, m.last) for m in months))
+    if len(unique) >= 2 and 'ketthuc' not in words and len(parsed.numbers) <= 1:
+        if parsed.numbers and parsed.numbers[0] != len(unique):
             return None
-        return [(m.first, m.last) for m in months]
+        return unique
     return None
 
 
@@ -366,8 +369,8 @@ def run_best_month(ctx, parsed):
     return {'type': 'date', 'answer': months[values.index(top)][0].strftime('%Y-%m')}
 
 
-@intent('revenue_trend', _MONTHS_WORDS + ' co tang lientuc khong qua luon hon sau truoc ky la roi',
-        lambda w, p: 'doanhthu' in w and bool({'lientuc', 'luon'} & w) and 'khong' in w,
+@intent('revenue_trend', _MONTHS_WORDS + ' co tang lientuc khong qua luon hon sau truoc ky la roi xu huong phai cao →',
+        lambda w, p: 'doanhthu' in w and (bool({'lientuc', 'luon'} & w) and 'khong' in w or {'xu', 'huong'} <= w),
         periods=(2, 12), numbers=(0, 1))
 def run_trend(ctx, parsed):
     months = month_list(parsed)
@@ -388,7 +391,7 @@ def shift_rows(ctx, period):
     return {row[0]: row[1:] for row in rows}
 
 
-_SHIFT_WORDS = 'casang cachieu doanhthu don so co tong cong ban duoc tien rieng trong cuahang dem'
+_SHIFT_WORDS = 'casang cachieu doanhthu don so co tong cong ban duoc tien rieng trong cuahang dem hang'
 
 
 @intent('shift_total', _SHIFT_WORDS, lambda w, p: bool({'casang', 'cachieu'} & w) and not {'casang', 'cachieu'} <= w
@@ -495,7 +498,7 @@ def product_sum(ctx, column, first, last, name):
     return Decimal(0) if row[0] is None else Decimal(str(row[0]))
 
 
-@intent('product_revenue', 'doanhthu cua tong cong ban duoc tien thu ve ra @p mathang hang',
+@intent('product_revenue', 'doanhthu cua tong cong ban duoc tien thu ve ra @p mathang hang mon',
         lambda w, p: '@p' in w and ('doanhthu' in w or 'tien' in w), entities=('product',))
 def run_product_revenue(ctx, parsed):
     period, product = _one_period(parsed), _entity(parsed, 'product')
@@ -505,7 +508,7 @@ def run_product_revenue(ctx, parsed):
     return None if value is None else number(whole(value))
 
 
-@intent('product_quantity', 'so ban duoc tong cong ra @p @u mathang hang',
+@intent('product_quantity', 'so ban duoc tong cong ra @p @u mathang hang mon',
         lambda w, p: '@p' in w and '@u' in w, entities=('product', 'unit'))
 def run_product_quantity(ctx, parsed):
     period, product, unit = _one_period(parsed), _entity(parsed, 'product'), _entity(parsed, 'unit')
@@ -517,7 +520,7 @@ def run_product_quantity(ctx, parsed):
     return None if value is None else number(quantity(value))
 
 
-@intent('unit_total', 'so ban duoc tong cong ra @u cong moi mathang tinh theo',
+@intent('unit_total', 'so ban duoc tong cong ra @u cong moi mathang mon tinh theo',
         lambda w, p: '@u' in w, entities=('unit',))
 def run_unit_total(ctx, parsed):
     period, unit = _one_period(parsed), _entity(parsed, 'unit')
@@ -557,7 +560,7 @@ def run_group_revenue(ctx, parsed):
 
 
 @intent('group_share', 'doanhthu cua tong chiem phantram trong @g dong gop cua ca tiem tile titrong ti',
-        lambda w, p: '@g' in w and 'doanhthu' in w and 'phantram' in w, entities=('group',))
+        lambda w, p: '@g' in w and 'doanhthu' in w and 'phantram' in w, entities=('group',), periods=(1, 2), repeat=True)
 def run_group_share(ctx, parsed):
     period, group = _one_period(parsed), _entity(parsed, 'group')
     if 'semantic.group_revenue_share' not in ctx.functions:
@@ -736,7 +739,7 @@ def run_customers_share(ctx, parsed):
 
 # ---- debt ----------------------------------------------------------------------------------------------------------
 
-_DEBT_WORDS = 'khach con no cua hang tong cong baonhieu tien tinh den het ngay cong so la chua tra thieu voi va'
+_DEBT_WORDS = 'khach con no cua hang tong cong baonhieu tien tinh den het ngay cong so la chua tra thieu voi va toi dang'
 
 
 def _debt_day(ctx, parsed):
@@ -746,7 +749,7 @@ def _debt_day(ctx, parsed):
     return parsed.periods[0].first
 
 
-@intent('total_debt', _DEBT_WORDS, lambda w, p: 'no' in w and 'khach' in w and bool({'tien', 'tong'} & w)
+@intent('total_debt', _DEBT_WORDS, lambda w, p: bool({'no', 'thieu'} & w) and 'khach' in w and bool({'tien', 'tong'} & w)
         and 'khach' in w and not any(a == 'baonhieu' and b == 'khach' for a, b in zip(p.words, p.words[1:])))
 def run_total_debt(ctx, parsed):
     day = _debt_day(ctx, parsed)
@@ -755,7 +758,7 @@ def run_total_debt(ctx, parsed):
     return number(whole(ctx.one('SELECT COALESCE(SUM(outstanding), 0) FROM semantic.debt_as_of(?)', day)[0]))
 
 
-@intent('debtor_count', _DEBT_WORDS + ' hoi', lambda w, p: 'no' in w and 'khach' in w and 'tien' not in w and 'nhat' not in w
+@intent('debtor_count', _DEBT_WORDS + ' hoi', lambda w, p: bool({'no', 'thieu'} & w) and 'khach' in w and 'tien' not in w and 'nhat' not in w
         and any((a in ('baonhieu', 'so') and b == 'khach') for a, b in zip(p.words, p.words[1:])))
 def run_debtor_count(ctx, parsed):
     day = _debt_day(ctx, parsed)
@@ -858,7 +861,7 @@ _CHANNELS = {'chphone': {'phone', 'dien thoai'}, 'chstore': {'store', 'tai quay'
 _PAYMENTS = {'pcash': {'cash', 'tien mat'}, 'pcod': {'cod', 'thu ho cod', 'thu ho'},
              'ptransfer': {'transfer', 'chuyen khoan'}, 'pewallet': {'ewallet', 'vi dien tu', 'e wallet'}}
 _BY_ORDER_WORDS = ('doanhthu cac don ban qua tra bang tong chiem phantram trong moi loai baonhieu va so lanluot sovoi '
-                   'bao la cho tile cua mot nhieu tien ti titrong')
+                   'bao la cho tile cua mot nhieu tien ti titrong ben')
 
 
 def _label(ctx, column, wanted):
@@ -905,7 +908,7 @@ def _order_group(table, column, name, prefix):
     marks = frozenset(table)
 
     @intent(name, _BY_ORDER_WORDS + ' ' + ' '.join(table), lambda w, p: bool(w & marks) and not w & _OTHER[prefix]
-            and bool({'doanhthu', 'tien'} & w))
+            and bool({'doanhthu', 'tien'} & w), periods=(1, 2), repeat=True)
     def run(ctx, parsed):
         found = _by_order(ctx, parsed, table, column)
         if found is None:
@@ -1073,6 +1076,9 @@ def answer(question, as_of_date, ctx):
             parsed = resolve_tet(ctx, parsed)
         if parsed is None:
             continue
+        if item.repeat and len(parsed.periods) > 1 and all(p == parsed.periods[0] for p in parsed.periods):
+            parsed = Parsed(parsed.question, parsed.today, parsed.words, parsed.periods[:1], parsed.numbers,
+                            parsed.next_word, parsed.entities)
         words = set(parsed.words)
         if not item.need(words, parsed):
             continue

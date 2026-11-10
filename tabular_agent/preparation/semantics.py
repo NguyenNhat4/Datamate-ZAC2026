@@ -37,6 +37,10 @@ def _source_tokens(value: str) -> set[str]:
         except UnicodeError:
             pass
         name = re.sub(r"\.(?:xlsx|csv|sqlite|sqlite3|db)$", "", name, flags=re.I)
+        # A README names a monthly series by a pattern ("BanHang_T<tháng>_<năm>.xlsx"); its files carry the month
+        # and year ("BanHang_T1_2025.xlsx"). Both reduce to the series name.
+        name = re.sub(r"_?(?:T|Thang|Thg)?<[^>]*>", "", name, flags=re.I)
+        name = re.sub(r"_(?:T|Thang|Thg)\d{1,2}(?:_20\d{2})?$", "", name, flags=re.I).rstrip("_")
         name = re.sub(r"_(?:\d{1,2}|20\d{2})$", "", name)
         if name:
             result.add(_token(name))
