@@ -118,6 +118,7 @@ Gathered on 10 November from the four records with plans. "Affects" gives the qu
 |---|---|---|---|
 | B15 | biz_124's drug-list sheet is reported as an ambiguous layout; the cause was not reproduced | biz_124 | Unseen 2 |
 | B16 | Thousands separators that could be read either way | several | Unseen 3.1 |
+| B17 | A blank text cell is published as `''`, not NULL, so `COUNT` and `GROUP BY` on that column count it. In the r2 bundles: 50 `clean` text columns, none in `semantic`. Fixing it needs a new bundle generation and a measurement; `test_safety.py` keeps it as an expected failure | queries over `clean` text columns | Cleanup 2.3 |
 
 ### Measurement and workflow
 
