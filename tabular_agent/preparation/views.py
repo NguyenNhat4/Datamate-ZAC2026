@@ -302,17 +302,18 @@ def publish_period_functions(connection, semantic, rulebook):
 
     Each function takes an inclusive date range and returns the finished
     figures, so a question is one call: revenue share by product group,
-    change against a base period, the morning and afternoon shifts, and
-    best-selling products. A function is published only when the sales
-    relations carry every column it needs.
+    change against a base period, the morning and afternoon shifts,
+    best-selling products, and products not sold in a period. A function is
+    published only when the sales relations carry every column it needs.
     """
     columns = {r['name']: set(r['roles']) for r in semantic}
     lines = columns.get('semantic.eligible_sales_lines', set())
     orders = columns.get('semantic.eligible_orders', set())
     quantities = columns.get('semantic.product_quantities', set())
     rules = text_key(rulebook)
-    if not {'line_amount', 'order_date'} <= lines:
+    if 'order_date' not in lines:
         return []
+    amounts = 'line_amount' in lines
     published = []
 
     def function(name, parameters, grain, meaning, meanings, sources, body):
@@ -322,7 +323,7 @@ def publish_period_functions(connection, semantic, rulebook):
             signature=f'semantic.{name}({", ".join(p + " DATE" for p in parameters)})',
             probe=f"SELECT * FROM semantic.{name}({', '.join(['DATE ' + _lit('2000-01-01')] * len(parameters))})"))
 
-    if 'product_group' in lines:
+    if amounts and 'product_group' in lines:
         function(
             'group_revenue_share', ['first_day', 'last_day'], 'product group',
             'Revenue of each product group from first_day to last_day and its share of the whole shop\'s revenue '
@@ -348,25 +349,26 @@ def publish_period_functions(connection, semantic, rulebook):
         'CASE WHEN r IS NULL OR base_r IS NULL THEN NULL ELSE n - base_n END AS orders_difference, '
         f'CASE WHEN r IS NULL OR base_r IS NULL THEN NULL ELSE {_percent("n - base_n", "base_n")} END AS orders_change_percent'
     ) if has_orders else ''
-    function(
-        'period_comparison', ['first_day', 'last_day', 'base_first_day', 'base_last_day'], 'comparison',
-        'Revenue' + (' and order count' if has_orders else '') + ' of the asked period (first_day to last_day) against '
-        'a base period (base_first_day to base_last_day), for "so với kỳ trước / tháng trước / cùng kỳ", '
-        '"tăng hay giảm bao nhiêu (%)", "hơn hay kém". Rulebook: difference = asked − base, and a fall is negative. '
-        'Take both ranges from the Dates block. One row.',
-        {'revenue': 'Revenue of the asked period; NULL when it has no sales data.',
-         'base_revenue': 'Revenue of the base period; NULL when it has no sales data.',
-         'revenue_difference': 'revenue − base_revenue, in VND.',
-         'revenue_change_percent': 'Percent change of revenue against the base period, rounded to 2 decimals.',
-         'orders': 'Orders that count as sales in the asked period.',
-         'base_orders': 'Orders that count as sales in the base period.',
-         'orders_difference': 'orders − base_orders.',
-         'orders_change_percent': 'Percent change of the order count against the base period, rounded to 2 decimals.'},
-        ['semantic.eligible_sales_lines'] + (['semantic.eligible_orders'] if has_orders else []),
-        f'SELECT r AS revenue, base_r AS base_revenue, r - base_r AS revenue_difference, '
-        f'{_percent("r - base_r", "base_r")} AS revenue_change_percent{order_columns} FROM ('
-        f'SELECT (SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE {_PERIOD}) AS r, '
-        f'(SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE {_BASE_PERIOD}) AS base_r{order_counts})')
+    if amounts:
+        function(
+            'period_comparison', ['first_day', 'last_day', 'base_first_day', 'base_last_day'], 'comparison',
+            'Revenue' + (' and order count' if has_orders else '') + ' of the asked period (first_day to last_day) against '
+            'a base period (base_first_day to base_last_day), for "so với kỳ trước / tháng trước / cùng kỳ", '
+            '"tăng hay giảm bao nhiêu (%)", "hơn hay kém". Rulebook: difference = asked − base, and a fall is negative. '
+            'Take both ranges from the Dates block. One row.',
+            {'revenue': 'Revenue of the asked period; NULL when it has no sales data.',
+             'base_revenue': 'Revenue of the base period; NULL when it has no sales data.',
+             'revenue_difference': 'revenue − base_revenue, in VND.',
+             'revenue_change_percent': 'Percent change of revenue against the base period, rounded to 2 decimals.',
+             'orders': 'Orders that count as sales in the asked period.',
+             'base_orders': 'Orders that count as sales in the base period.',
+             'orders_difference': 'orders − base_orders.',
+             'orders_change_percent': 'Percent change of the order count against the base period, rounded to 2 decimals.'},
+            ['semantic.eligible_sales_lines'] + (['semantic.eligible_orders'] if has_orders else []),
+            f'SELECT r AS revenue, base_r AS base_revenue, r - base_r AS revenue_difference, '
+            f'{_percent("r - base_r", "base_r")} AS revenue_change_percent{order_columns} FROM ('
+            f'SELECT (SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE {_PERIOD}) AS r, '
+            f'(SELECT SUM(line_amount) FROM semantic.eligible_sales_lines WHERE {_BASE_PERIOD}) AS base_r{order_counts})')
 
     if {'shift', 'revenue', 'order_date'} <= orders:
         function(
@@ -389,7 +391,7 @@ def publish_period_functions(connection, semantic, rulebook):
             f'{_percent("s.orders - m.mo", "m.mo")} AS orders_vs_morning_percent '
             "FROM s LEFT JOIN m ON TRUE ORDER BY CASE s.shift WHEN 'morning' THEN 1 ELSE 2 END")
 
-    if {'base_quantity', 'order_date'} <= quantities and {'product_id', 'product_name'} & quantities:
+    if {'base_quantity', 'order_date', 'line_amount'} <= quantities and {'product_id', 'product_name'} & quantities:
         identity = 'product_id' if 'product_id' in quantities else 'product_name'
         named = 'product_name' in quantities
         # Rulebook: a service-fee line is not a product; it is neither ranked nor counted.
@@ -411,6 +413,25 @@ def publish_period_functions(connection, semantic, rulebook):
             f'SELECT row_number() OVER (ORDER BY SUM(base_quantity) DESC, {identity}) AS rank, {code}{name}{unit}'
             'SUM(base_quantity) AS base_quantity, SUM(line_amount) AS revenue FROM semantic.product_quantities '
             f'WHERE {_PERIOD}{excluded} AND {identity} IS NOT NULL GROUP BY {identity} ORDER BY rank')
+
+    if {'product_id', 'product_name'} & lines:
+        identity = 'product_id' if 'product_id' in lines else 'product_name'
+        named = 'product_name' in lines
+        fees = [label for label in _SERVICE_LINES if label in rules] if named else []
+        excluded = (f" AND {_fold('product_name')} NOT IN ({', '.join(_lit(label) for label in fees)})" if fees else '')
+        code = 'product_id, ' if identity == 'product_id' else ''
+        name = 'min(product_name) AS product_name, ' if identity == 'product_id' and named else (
+            'product_name, ' if named else '')
+        function(
+            'unsold_products', ['first_day', 'last_day'], 'product',
+            'Unsold products (mặt hàng ế): sold before first_day, not from first_day to last_day; counted sales only'
+            + ('; no service fees' if fees else '') + '.',
+            {'last_sold': 'Last day the product was sold before first_day.'},
+            ['semantic.eligible_sales_lines'],
+            f'SELECT {code}{name}MAX(order_date) AS last_sold FROM semantic.eligible_sales_lines '
+            f'WHERE order_date < CAST(first_day AS DATE){excluded} AND {identity} IS NOT NULL AND {identity} NOT IN '
+            f'(SELECT {identity} FROM semantic.eligible_sales_lines WHERE {_PERIOD} AND {identity} IS NOT NULL) '
+            f'GROUP BY {identity} ORDER BY {identity}')
     return published
 
 

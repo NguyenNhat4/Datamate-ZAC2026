@@ -69,6 +69,11 @@ PATTERNS = (
      'Day with the highest revenue in a period, answer type date',
      "SELECT order_date FROM semantic.eligible_sales_lines WHERE order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' "
      "GROUP BY order_date ORDER BY SUM(line_amount) DESC, order_date LIMIT 1"),
+    ('semantic.eligible_sales_lines', ('line_amount', 'order_date'),
+     'Number of days whose revenue reaches an amount (có mấy ngày doanh thu đạt X trở lên): compare daily totals, '
+     'never single lines; use > for "trên / vượt", < for "dưới"',
+     "SELECT COUNT(*) FROM (SELECT order_date FROM semantic.eligible_sales_lines WHERE order_date BETWEEN "
+     "DATE '2025-06-01' AND DATE '2025-06-30' GROUP BY order_date HAVING SUM(line_amount) >= 49000000)", 'days'),
     ('semantic.period_comparison', ('revenue_change_percent',),
      'Percent change of revenue against an earlier period (so với tháng trước / cùng kỳ, tăng hay giảm bao nhiêu %), '
      'answer type percent; asked period first, earlier period second, both from the Date phrases. '
@@ -104,8 +109,14 @@ PATTERNS = (
      'Customers by number of orders (walk-in orders have no customer_key and are not customers); here: customers with at least 3 orders',
      "SELECT COUNT(*) FROM (SELECT customer_key FROM semantic.eligible_orders WHERE customer_key IS NOT NULL "
      "AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' GROUP BY customer_key HAVING COUNT(*) >= 3)"),
+    ('semantic.eligible_orders', ('order_date', 'customer_key', 'customer_name', 'revenue'),
+     'Customers who bought the most money (mua nhiều tiền nhất, chi tiêu nhiều nhất, top k khách): walk-in orders '
+     'have no customer_key and are never ranked; answer type list of names in rank order (string for one customer)',
+     "SELECT MIN(customer_name) FROM semantic.eligible_orders WHERE customer_key IS NOT NULL "
+     "AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' GROUP BY customer_key "
+     "ORDER BY SUM(revenue) DESC, customer_key LIMIT 3", 'customers'),
     ('semantic.eligible_orders', ('order_date', 'customer_key', 'customer_name'),
-     'Customer with the most orders (use SUM(revenue) for the customer who bought the most money), answer type string',
+     'Customer with the most orders (nhiều đơn nhất), answer type string',
      "SELECT MIN(customer_name) FROM semantic.eligible_orders WHERE customer_key IS NOT NULL "
      "AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30' GROUP BY customer_key ORDER BY COUNT(*) DESC, customer_key LIMIT 1"),
     ('semantic.orders', ('order_date', 'order_state'),
@@ -122,6 +133,10 @@ PATTERNS = (
      'Units sold of one named product (bán được mấy kg / ly / phần <tên hàng>); base_quantity is already in the base unit',
      "SELECT SUM(base_quantity) FROM semantic.product_quantities WHERE name_like(product_name, 'tên hàng') "
      "AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"),
+    ('semantic.unsold_products', ('product_name',),
+     'Unsold products in a period (mặt hàng ế, không bán được, không ai mua; not hết hàng): count the rows for '
+     '"mấy mặt hàng ế", list product_name for "những mặt hàng nào"',
+     "SELECT COUNT(*) FROM semantic.unsold_products(DATE '2025-06-01', DATE '2025-06-30')", 'unsold'),
     ('semantic.top_products', ('rank', 'product_name'),
      'Best-selling products (bán chạy nhất, bán nhiều nhất, hot nhất, top k): answer type list of the names in rank order; '
      'a question about the single best seller (mặt hàng nào) is answer type string',
@@ -437,7 +452,9 @@ def describe_schema(connection, schema, question=None):
     unready = unready_sales_relations(schema)
     limited = {relation['name'].lower() for relation in relations if unready and relation.get('grain') in _SALES_GRAINS
                and relation['name'].startswith('clean.') and relation['name'].lower() not in unready}
-    semantic = [r for r in relations if r['name'].startswith('semantic.')]
+    shown = lambda relation: (question is None or relation['name'] not in _RELATION_KINDS
+                              or _PATTERN_KINDS[_RELATION_KINDS[relation['name']]](question))
+    semantic = [r for r in relations if r['name'].startswith('semantic.') and shown(r)]
     clean = [r for r in relations if not r['name'].startswith('semantic.') and r['name'].lower() not in unready]
     lines = []
     if semantic:
@@ -473,7 +490,8 @@ def describe_schema(connection, schema, question=None):
                       'A question that needs sales records (revenue, number of orders, quantities sold, best-selling '
                       'products, top customers, the selling price on a date) cannot be answered for this business: '
                       f'answer {abstain}. ' + price + ' Other tables listed above can be used for what they record.', '']
-    published = {relation['name']: {column['name'] for column in relation.get('columns', [])} for relation in relations}
+    published = {relation['name']: {column['name'] for column in relation.get('columns', [])} for relation in relations
+                 if shown(relation)}
     patterns = extra_patterns + [f'- {title}:\n  {sql}' for name, needed, title, sql, *kind in PATTERNS
                 if name in published and set(needed) <= published[name]
                 and (question is None or not kind or _PATTERN_KINDS[kind[0]](question))]
@@ -559,6 +577,37 @@ def asks_shift(question):
     return re.search(r' ca (?:sang|chieu)', f' {_fold(question)} ') is not None
 
 
+def _words_of(question):
+    """Accent-folded question with punctuation as spaces, padded with spaces for whole-word matching."""
+    return ' ' + re.sub(r'[^a-z0-9 ]+', ' ', _fold(question)) + ' '
+
+
+def ranks_customers(question):
+    """True when the question ranks customers by what they bought (not by debt)."""
+    words = _words_of(question)
+    return (re.search(r' (?:khach|kh|nguoi mua|ai mua|ai la nguoi mua)', words) is not None
+            and re.search(r'nhat |top|hang dau|dung dau|chi tieu|tong tien', words) is not None
+            and re.search(r' (?:no|cong no|con no|tra no) ', words) is None)
+
+
+def counts_days_over_amount(question):
+    """True when the question counts or lists days whose revenue is above or below an amount."""
+    words = _words_of(question)
+    return (re.search(r' (?:may|bao nhieu|bn|nhieu|nhung|cac|so) ngay ', words) is not None
+            and (re.search(r' (?:tro le\w*|tro xuong|tren|duoi|vuot|it nhat|toi thieu|hon|dat|qua) ', words) is not None
+                 or re.search(r'[≥≤<>]', question) is not None))
+
+
+def asks_unsold(question):
+    """True when the question is about products not sold in a period (hàng ế, không bán được)."""
+    words = _words_of(question)
+    product = r'(?:mat hang|mawtj hang|mat hag|hang|mon|san pham|sp)'
+    cue = (re.search(product + r' (?:bi )?(?:e|ees|es) ', words) or re.search(r' e (?:han|am|qua|lam) ', words)
+           or re.search(r' (?:khong|ko|k|hong|chua) (?:ban|ban ra|ban duoc|ban dc|ai mua|ai dat|co don nao)', words)
+           or re.search(r' ban (?:cham|khong chay|ko chay|e) ', words))
+    return bool(cue and re.search(' ' + product + ' ', words))
+
+
 def compares_periods(question):
     """True when the question compares a period with another period, not the two shifts of one period."""
     if mentions_earlier_period(question):
@@ -568,7 +617,10 @@ def compares_periods(question):
     return not asks_shift(question) and any(f' {cue} ' in folded for cue in _COMPARE)
 
 
-_PATTERN_KINDS = {'comparison': compares_periods, 'shift': asks_shift}
+_PATTERN_KINDS = {'comparison': compares_periods, 'shift': asks_shift, 'customers': ranks_customers,
+                  'days': counts_days_over_amount, 'unsold': asks_unsold}
+# Relations described only for their kind of question: every prompt token counts in the largest bundles.
+_RELATION_KINDS = {'semantic.unsold_products': 'unsold'}
 
 
 # Accent-, case- and spacing-insensitive comparison key; strip_accents keeps the letter đ, so it is folded separately.

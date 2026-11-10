@@ -11,8 +11,8 @@ from tabular_agent.preparation.pipeline import (
     _documented_header, _inherit_group_values, _relation_base, _schema, _sequence_epoch)
 from tabular_agent.preparation.semantics import canonical_status, map_status_labels
 from tabular_agent.sql_agent import (
-    QueryRejected, asks_percent, check_query, compares_periods, date_block, date_phrases, describe_schema, grounded,
-    normalize_answer, rescaled_percent, unready_sales_relations)
+    QueryRejected, asks_percent, asks_unsold, check_query, compares_periods, counts_days_over_amount, date_block,
+    date_phrases, describe_schema, grounded, normalize_answer, ranks_customers, rescaled_percent, unready_sales_relations)
 
 
 RULES = """
@@ -235,7 +235,7 @@ class BusinessViews(unittest.TestCase):
     def test_period_functions_answer_in_one_call(self):
         schema = self.period_shop()
         self.assertTrue({"semantic.group_revenue_share", "semantic.period_comparison", "semantic.shift_summary",
-                         "semantic.top_products"} <= self.names(schema))
+                         "semantic.top_products", "semantic.unsold_products"} <= self.names(schema))
         feb = "DATE '2025-02-01', DATE '2025-02-28'"
         # The share's denominator is the whole shop, including the ungrouped service-fee line; similar names stay apart.
         self.assertEqual(self.db.execute(f"SELECT product_group, revenue, shop_revenue, share_percent "
@@ -258,12 +258,25 @@ class BusinessViews(unittest.TestCase):
         self.assertEqual(self.db.execute(f"SELECT rank, product_id, product_name, base_quantity "
                                          f"FROM semantic.top_products({feb})").fetchall(),
                          [(1, "P1", "Trà", Decimal(3)), (2, "P2", "Trà sữa", Decimal(3)), (3, "P4", "Bánh", Decimal(1))])
+        # Unsold: sold in a counted order before the period, not in it. P2's only sale in the period is cancelled;
+        # P4 was first sold in the period; the service-fee line is not a product.
+        self.assertEqual(self.db.execute("SELECT product_id, product_name, last_sold FROM semantic.unsold_products("
+                                         "DATE '2025-02-04', DATE '2025-02-28')").fetchall(),
+                         [("P1", "Trà", date(2025, 2, 3)), ("P2", "Trà sữa", date(2025, 2, 3))])
+        self.assertEqual(self.db.execute(f"SELECT count(*) FROM semantic.unsold_products({feb})").fetchone()[0], 0)
 
     def test_comparison_and_shift_patterns_follow_the_question(self):
         schema = {"relations": self.period_shop().relations}
         self.db.execute("SET search_path='semantic,clean'")
-        plain, _ = describe_schema(self.db, schema, "Cho tôi biết dthu tuần trước.")
+        plain, allowed = describe_schema(self.db, schema, "Cho tôi biết dthu tuần trước.")
         self.assertNotIn("FROM semantic.period_comparison(", plain)
+        # The unsold-products function is described only for questions about unsold products.
+        self.assertNotIn("semantic.unsold_products", plain)
+        self.assertNotIn("semantic.unsold_products", allowed)
+        unsold, allowed = describe_schema(self.db, schema, "Tháng 2/2025 có mấy mặt hàng ế?")
+        self.assertIn("semantic.unsold_products(first_day DATE, last_day DATE)", unsold)
+        self.assertIn("SELECT COUNT(*) FROM semantic.unsold_products(", unsold)
+        self.assertIn("semantic.unsold_products", allowed)
         self.assertNotIn("FROM semantic.shift_summary(", plain)
         compared, _ = describe_schema(self.db, schema, "So với tháng trước, doanh thu tháng 2/2025 tăng mấy %?")
         self.assertIn("SELECT revenue_change_percent FROM semantic.period_comparison(", compared)
@@ -274,6 +287,29 @@ class BusinessViews(unittest.TestCase):
         # Without a question every pattern the bundle supports is shown.
         everything, _ = describe_schema(self.db, schema)
         self.assertIn("FROM semantic.period_comparison(", everything)
+        self.assertIn("SELECT COUNT(*) FROM semantic.unsold_products(", everything)
+        self.assertIn("HAVING SUM(line_amount) >= 49000000", everything)
+        # The shop records no customers, so the customer ranking is not offered.
+        self.assertNotIn("Customers who bought the most money", everything)
+
+    def test_customers_ranked_by_money_leave_out_walk_in_orders(self):
+        self.table("orders", "order", {"order_id": "VARCHAR", "order_date": "DATE", "status": "VARCHAR",
+                                       "customer_id": "VARCHAR"},
+                   [("1", "2025-01-01", "completed", "C1"), ("2", "2025-01-02", "completed", None),
+                    ("3", "2025-01-03", "completed", "C3"), ("4", "2025-01-04", "completed", "C2")], ["order_id"])
+        self.table("items", "order_item", {"order_id": "VARCHAR", "line_number": "VARCHAR", "product_name": "VARCHAR",
+                                           "line_amount": "DECIMAL(20,0)"},
+                   [("1", "1", "A", 100), ("2", "1", "A", 500), ("3", "1", "A", 200), ("4", "1", "A", 200)],
+                   ["order_id", "line_number"])
+        self.table("customers", "customer", {"customer_id": "VARCHAR", "customer_name": "VARCHAR"},
+                   [("C1", "An"), ("C2", "Bình"), ("C3", "Chi")], ["customer_id"])
+        schema = _schema(self.db, self.profile, self.relations, "", RULES)
+        self.db.execute("SET search_path='semantic,clean'")
+        text, _ = describe_schema(self.db, {"relations": schema.relations})
+        sql = text[text.index("- Customers who bought the most money"):].split("\n")[1].strip()
+        sql = sql.replace("2025-06-01", "2025-01-01").replace("2025-06-30", "2025-01-31")
+        # The walk-in order (500) is not a customer; C2 and C3 tie at 200 and are ordered by code.
+        self.assertEqual(self.db.execute(sql).fetchall(), [("Bình",), ("Chi",), ("An",)])
 
     def test_period_functions_need_their_columns(self):
         self.table("items", "order_item", {"order_id": "VARCHAR", "order_date": "DATE", "status": "VARCHAR",
@@ -281,8 +317,20 @@ class BusinessViews(unittest.TestCase):
                    [("1", "2025-01-01", "completed", "A", 10)])
         names = self.names(_schema(self.db, self.profile, self.relations, "", RULES))
         self.assertIn("semantic.period_comparison", names)
+        self.assertIn("semantic.unsold_products", names)
         for name in ("semantic.group_revenue_share", "semantic.shift_summary", "semantic.top_products"):
             self.assertNotIn(name, names)
+
+    def test_lines_without_amounts_still_get_unsold_products(self):
+        self.table("items", "order_item", {"order_id": "VARCHAR", "order_date": "DATE", "status": "VARCHAR",
+                                           "product_name": "VARCHAR", "quantity": "DECIMAL(20,0)"},
+                   [("1", "2025-01-01", "completed", "A", 1), ("2", "2025-02-01", "completed", "B", 1)])
+        names = self.names(_schema(self.db, self.profile, self.relations, "", RULES))
+        self.assertIn("semantic.unsold_products", names)
+        for name in ("semantic.period_comparison", "semantic.group_revenue_share", "semantic.top_products"):
+            self.assertNotIn(name, names)
+        self.assertEqual(self.db.execute("SELECT product_name FROM semantic.unsold_products("
+                                         "DATE '2025-02-01', DATE '2025-02-28')").fetchall(), [("A",)])
 
     def test_stock_without_unit_conversions_still_reports_base_units(self):
         self.table("stock", "inventory_snapshot", {"product_id": "VARCHAR", "product_name": "VARCHAR", "base_unit": "VARCHAR",
@@ -514,6 +562,24 @@ class AnswerFormat(unittest.TestCase):
         self.assertTrue(grounded(2.89, [2.8912]))
         self.assertFalse(grounded(79, [0.79]))
         self.assertFalse(grounded(0, []))
+
+    def test_question_kinds_for_rankings_and_counts(self):
+        for text in ("Tháng 6/2025 khách nào mua nhiều tiền nhất?", "top 3 khach chi tieu nhieu nhat tuan roi",
+                     "ai mua hang nhiu tien nhat thang 3/2025"):
+            self.assertTrue(ranks_customers(text), text)
+        for text in ("5 khách nào đang nợ nhiều nhất?", "doanh thu tháng 6/2025 là bao nhiêu"):
+            self.assertFalse(ranks_customers(text), text)
+        for text in ("Tháng 5 có mấy ngày doanh thu đạt 20.000.000 đồng trở lên?", "so ngay co dthu ≥ 10.000.000 la bn"):
+            self.assertTrue(counts_days_over_amount(text), text)
+        # "đắt" (expensive) folds like "đạt" (reach): the best day is not a threshold count.
+        for text in ("tháng 4 ngày nào bán đắt nhất", "doanh thu ngày 3/4/2025"):
+            self.assertFalse(counts_days_over_amount(text), text)
+        for text in ("Tuần rồi có mấy mặt hàng ế?", "co bao nhieu mat hang ko ban duoc cai nao trong 7 ngay"):
+            self.assertTrue(asks_unsold(text), text)
+        # "ê" opening a question folds like "ế"; out of stock (hết hàng) is a different question.
+        for text in ("e doanh thu cua hang hom qua bao nhieu", "Cuối ngày có mấy mặt hàng hết hàng?",
+                     "ê nhóm hàng trà chiếm bao nhiêu %"):
+            self.assertFalse(asks_unsold(text), text)
 
     def test_comparisons_with_an_earlier_period(self):
         for question in ("So với tháng trước đó, doanh thu tháng 11/2025 tăng hay giảm mấy phần trăm?",
