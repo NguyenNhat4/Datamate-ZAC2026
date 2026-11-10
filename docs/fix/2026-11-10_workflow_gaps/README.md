@@ -51,6 +51,8 @@ Priority 1 holds back the goal or the public run directly. "Done" marks what thi
 
 ### 3.1 The submission entrypoint does not run what is measured
 
+**Done since this review.** `predict.sh` prepares the split and answers with SQL and the benchmark settings (`506d567`, [entrypoint record](../2026-11-10_submission_entrypoint/README.md)). The full public dry run is still to do. The evidence below describes the code before that commit.
+
 **Missing.** `predict.sh` runs `cli predict --split /data --output /result` with no `--prepared` and no `--max-steps`. It therefore runs the old raw-file agent with at most 4 steps. Every score since 9 November comes from SQL answering (`agent_mode: sql` in every manifest) with `--prepared … --max-steps 6 --temperature 0`. `make predict` and the README examples still use port 8000; the benchmarks use 18234.
 
 **Also missing:**
@@ -214,6 +216,8 @@ The checks against references for the 10 November patterns (71, 20, 33 questions
 **Proposed.** One pass over the rules against `evaluate.py`, with a test case for each rule: answer types, string normalization, number tolerance, percent rounding, list order, table columns and row sets, and aliases.
 
 ### 3.10 Stale documents and tests
+
+**Being done.** The [cleanup record](../2026-11-10_cleanup_plan/README.md) carries this out and also removes the raw-file agent.
 
 **Evidence.**
 

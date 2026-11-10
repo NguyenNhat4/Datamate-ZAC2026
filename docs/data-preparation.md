@@ -1,6 +1,6 @@
 # Data profiling and preparation
 
-The preparation layer reads every supported business file and publishes a typed DuckDB database with a documented schema. It does not read questions or reference answers. SQL question answering is a separate consumer; the existing Python agent is unchanged.
+The preparation layer reads every supported business file and publishes a typed DuckDB database with a documented schema. It does not read questions or reference answers. SQL question answering (`tabular_agent/sql_agent.py`) reads the bundles; see [answering from a bundle](#answering-from-a-bundle).
 
 ## Commands
 
@@ -26,7 +26,7 @@ Reuse or correct the saved extraction specification:
 make prepare ARGS="--business shop_directory --spec artifacts/prepared/BUNDLE/spec.json"
 ```
 
-The specification is tied to source/region identifiers, not question identifiers. Changing it creates a different immutable bundle. The generated schema is not permission to access private database namespaces: the future SQL executor must enforce the exported relation/column allowlist.
+The specification is tied to source/region identifiers, not question identifiers. Changing it creates a different immutable bundle. The generated schema is not permission to access private database namespaces: the SQL answering path checks every query against the exported relations and rejects the rest.
 
 ## Public interfaces
 

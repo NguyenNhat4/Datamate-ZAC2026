@@ -1,7 +1,7 @@
 # Plan: enforce the order-count eligibility policy
 
 Date: 8 November 2026  
-Status: proposed implementation plan; documentation only  
+Status: superseded on 9 November and not implemented. SQL answering over prepared bundles replaced the raw-file agent this plan was for; order eligibility is now applied in the prepared `semantic` relations ([SQL answering record](../2026-11-09_sql_answering_accuracy/README.md)). Kept as a record only.  
 Scope: prevent the single agent from accepting an order count that contradicts the current question and split rulebook.
 
 ## 1. Main issue

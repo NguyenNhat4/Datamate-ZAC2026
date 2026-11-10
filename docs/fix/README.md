@@ -14,7 +14,7 @@ Last updated: 10 November 2026, code `5e1507b`, branch `fix/sql-answering-accura
 - **What the gate does not cover.** Report these next to the gate score:
   - The public businesses without rulebook-ready sales lines: 7 businesses, 420 of the 1,000 public questions.
   - dev_006: 111 questions at the prompt-size limit.
-  - The submission entrypoint, which does not yet run the measured system.
+  - The full public dry run through `predict.sh`, which has not been completed yet (B6).
 
   See the workflow review, 3.1 and 3.2.
 
@@ -74,6 +74,7 @@ The frozen ids are in [question_sets.json](2026-11-10_unseen_businesses/question
 | 10 Nov | [Rankings, ties and query patterns](2026-11-10_rankings_and_patterns/README.md), with [PROGRESS](2026-11-10_rankings_and_patterns/PROGRESS.md) | One DuckDB thread; customers by money; days over an amount; unsold products; byte-identical prompts for other kinds | `c509cba`, `a77671d`, `5e1507b` | Done |
 | 10 Nov | [Workflow review](2026-11-10_workflow_gaps/README.md) | What the workflow lacks for the 100-question goal; proposed samples and additions | none | Review; additions proposed |
 | 10 Nov | [Submission entrypoint](2026-11-10_submission_entrypoint/README.md) | `predict.sh` prepares the data at run time and answers with SQL and the benchmark settings, within the 6-hour budget; each question's log holds its final answer | `506d567` | Code done and checked; the full public dry run is still to do (runbook section 11) |
+| 10 Nov | [Cleanup of the retired path and outdated documents](2026-11-10_cleanup_plan/README.md) | Removing the raw-file CodeAgent path, dead tests and outdated documents; Makefile and scripts use the measured settings | see the record | In progress |
 
 ## Terms
 
