@@ -4,6 +4,8 @@ from decimal import Decimal, ROUND_HALF_UP
 import json
 from pathlib import Path
 
+from .text import strip_accents
+
 CENT = Decimal('0.01')
 
 
@@ -66,6 +68,20 @@ class Context:
                 if first and last:
                     return first, last
         return None
+
+    def source_mentions(self, hints):
+        """True when a cleaned source column, or a column preparation withheld, has one of the hints in its name.
+
+        Used before answering "the data does not say": an absent published column counts as absent information only
+        when no source column even looks like it.
+        """
+        for relation in self.schema['relations']:
+            if relation['name'].startswith('semantic.'):
+                continue
+            names = [c['name'] for c in relation.get('columns', [])] + [str(c) for c in relation.get('blocked_columns') or []]
+            if any(hint in strip_accents(name) for name in names for hint in hints):
+                return True
+        return False
 
     def outside(self, first, last):
         """True when [first, last] lies entirely before or after the sales dates of the bundle."""

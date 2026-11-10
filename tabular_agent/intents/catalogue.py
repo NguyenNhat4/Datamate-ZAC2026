@@ -15,7 +15,7 @@ from .context import percent, whole
 from .entities import Catalog
 from .text import FILLER, canonical_tokens, prepare
 
-COMMON = frozenset('trong ngay rieng tinh xet theo vao luc tai da'.split())
+COMMON = frozenset('trong ngay rieng tinh xet theo vao luc tai da co'.split())
 SLOTS = frozenset({'@t', '@n'})
 ENTITY_SLOTS = {'product': '@p', 'group': '@g', 'unit': '@u', 'size': '@z'}
 _NUMBER = re.compile(r'^(\d{1,3}(?:\.\d{3})+|\d+)d?$')
@@ -43,7 +43,8 @@ class Intent:
         need: Predicate on (set of words, Parsed) that must hold.
         periods: Allowed (min, max) number of period slots.
         numbers: Allowed (min, max) number of number slots.
-        entities: Kinds of catalogue names the question must contain, exactly (product, group, unit, size).
+        entities: Kinds of catalogue names the question must contain, exactly (product, group, unit, size, customer).
+        optional: Kinds that may also occur, any number of times (they are ignored).
         run: Executor (Context, Parsed) -> answer dict or None. None means "cannot answer here": the model is asked.
     """
     name: str
@@ -52,23 +53,29 @@ class Intent:
     periods: tuple
     numbers: tuple
     entities: tuple
+    optional: tuple
     run: Callable
 
 
 INTENTS = []
 
 
-def intent(name, words, need, periods=(1, 1), numbers=(0, 0), entities=()):
+def intent(name, words, need, periods=(1, 1), numbers=(0, 0), entities=(), optional=()):
     """Register an intent; decorates its executor."""
     def register(run):
-        INTENTS.append(Intent(name, frozenset(words.split()), need, periods, numbers, tuple(sorted(entities)), run))
+        INTENTS.append(Intent(name, frozenset(words.split()), need, periods, numbers, tuple(sorted(entities)),
+                              tuple(optional), run))
         return run
     return register
 
 
+# Words that only occur inside the joined phrases of text._PHRASES; known so that typing variants of them are repaired.
+PHRASE_PARTS = frozenset('dien thoai tai quay zalo oa tien mat chuyen khoan vi tu xuat hien it lan luot ca sang chieu'.split())
+
+
 def known_words():
     """Every canonical word the registered intents or the period patterns use."""
-    out = set(FILLER) | set(COMMON) | set(P.WORDS)
+    out = set(FILLER) | set(COMMON) | set(P.WORDS) | PHRASE_PARTS
     for item in INTENTS:
         out |= item.words
     return out
@@ -116,14 +123,31 @@ NO_DATA = 'The asked period lies outside the dates the data covers.'
 
 # ---- shared queries ------------------------------------------------------------------------------------------------
 
+def amount_column(ctx):
+    """Name of the order-level revenue column of semantic.eligible_orders (the goods amount when no revenue column)."""
+    for column in ('revenue', 'order_goods_amount'):
+        if ctx.has('semantic.eligible_orders', column):
+            return column
+    return None
+
+
+def daily_revenue_relation(ctx):
+    """(relation, amount column) to total revenue by day: sales lines, else rulebook-ready orders; None without either."""
+    if ctx.has('semantic.eligible_sales_lines', 'line_amount', 'order_date'):
+        return 'semantic.eligible_sales_lines', 'line_amount'
+    if amount_column(ctx) and ctx.has('semantic.eligible_orders', 'order_date'):
+        return 'semantic.eligible_orders', amount_column(ctx)
+    return None
+
+
 def revenue(ctx, first, last):
     """Rulebook revenue of [first, last]: line amounts of orders that count as sales; None when no source exists."""
     if ctx.has('semantic.eligible_sales_lines', 'line_amount', 'order_date'):
         row = ctx.one('SELECT SUM(line_amount) FROM semantic.eligible_sales_lines '
                       'WHERE CAST(order_date AS DATE) BETWEEN ? AND ?', first, last)
-    elif ctx.has('semantic.eligible_orders', 'revenue', 'order_date'):
-        row = ctx.one('SELECT SUM(revenue) FROM semantic.eligible_orders WHERE CAST(order_date AS DATE) BETWEEN ? AND ?',
-                      first, last)
+    elif amount_column(ctx) and ctx.has('semantic.eligible_orders', 'order_date'):
+        row = ctx.one(f'SELECT SUM({amount_column(ctx)}) FROM semantic.eligible_orders '
+                      'WHERE CAST(order_date AS DATE) BETWEEN ? AND ?', first, last)
     else:
         return None
     return Decimal(0) if row[0] is None else Decimal(str(row[0]))
@@ -197,11 +221,11 @@ def run_cancellation_rate(ctx, parsed):
         lambda w, p: 'trungbinh' in w and 'don' in w)
 def run_average_order(ctx, parsed):
     period = _one_period(parsed)
-    if not ctx.has('semantic.eligible_orders', 'order_date', 'revenue'):
+    if not amount_column(ctx) or not ctx.has('semantic.eligible_orders', 'order_date'):
         return None
     if ctx.outside(period.first, period.last):
         return unanswerable(NO_DATA)
-    total, count = ctx.one('SELECT SUM(revenue), COUNT(*) FROM semantic.eligible_orders '
+    total, count = ctx.one(f'SELECT SUM({amount_column(ctx)}), COUNT(*) FROM semantic.eligible_orders '
                            'WHERE CAST(order_date AS DATE) BETWEEN ? AND ?', period.first, period.last)
     if not count:
         return None
@@ -211,13 +235,13 @@ def run_average_order(ctx, parsed):
 @intent('best_day', 'ngay nao ban duoc nhieu tien nhat doanhthu cao dat cuahang',
         lambda w, p: 'nao' in w and 'nhat' in w and ('doanhthu' in w or 'tien' in w))
 def run_best_day(ctx, parsed):
-    period = _one_period(parsed)
-    if not ctx.has('semantic.eligible_sales_lines', 'line_amount', 'order_date'):
+    period, source = _one_period(parsed), daily_revenue_relation(ctx)
+    if source is None:
         return None
     if ctx.outside(period.first, period.last):
         return unanswerable(NO_DATA)
-    row = ctx.one('SELECT CAST(order_date AS DATE) AS d FROM semantic.eligible_sales_lines '
-                  'WHERE CAST(order_date AS DATE) BETWEEN ? AND ? GROUP BY 1 ORDER BY SUM(line_amount) DESC, 1 LIMIT 1',
+    row = ctx.one(f'SELECT CAST(order_date AS DATE) AS d FROM {source[0]} '
+                  f'WHERE CAST(order_date AS DATE) BETWEEN ? AND ? GROUP BY 1 ORDER BY SUM({source[1]}) DESC, 1 LIMIT 1',
                   period.first, period.last)
     return None if row is None else {'type': 'date', 'answer': row[0].isoformat()}
 
@@ -253,7 +277,7 @@ def comparison_periods(parsed):
     return None
 
 
-@intent('revenue_change', 'doanhthu tang giam hay thay doi sovoi hon kem chenh phantram truong thang truoc lientruoc '
+@intent('revenue_change', 'doanhthu tang giam hay thay doi sovoi so hon kem chenh phantram truong thang truoc lientruoc '
         'truocdo cungky nam ngoai roi mot nhieu tong cuahang',
         lambda w, p: 'doanhthu' in w and 'phantram' in w and bool({'tang', 'giam', 'thay', 'hon', 'kem', 'chenh', 'truong'} & w),
         periods=(1, 3))
@@ -315,7 +339,7 @@ def monthly_revenue(ctx, months):
     return out
 
 
-_MONTHS_WORDS = 'doanhthu thang cua va tu den toi cac ba moi lanluot ghi theo thutu do thoigian so lietke ke liennhau lientiep'
+_MONTHS_WORDS = 'doanhthu thang cua va tu den toi cac ba moi lanluot ghi theo thutu do thoigian so lietke ke liennhau lientiep cu tung'
 
 
 @intent('monthly_revenue', _MONTHS_WORDS + ' ketthuc o', lambda w, p: 'doanhthu' in w and bool({'moi', 'lanluot', 'ghi', 'lietke', 'ketthuc'} & w),
@@ -340,7 +364,7 @@ def run_best_month(ctx, parsed):
     return {'type': 'date', 'answer': months[values.index(top)][0].strftime('%Y-%m')}
 
 
-@intent('revenue_trend', _MONTHS_WORDS + ' co tang lientuc khong qua luon hon sau truoc ky la',
+@intent('revenue_trend', _MONTHS_WORDS + ' co tang lientuc khong qua luon hon sau truoc ky la roi',
         lambda w, p: 'doanhthu' in w and bool({'lientuc', 'luon'} & w) and 'khong' in w,
         periods=(2, 12), numbers=(0, 1))
 def run_trend(ctx, parsed):
@@ -383,7 +407,7 @@ def run_shift_total(ctx, parsed):
     return number(whole(revenue_) if 'don' not in words else orders_)
 
 
-@intent('shift_comparison', _SHIFT_WORDS + ' sovoi chenh hon kem tang giam phantram thi', lambda w, p: {'casang', 'cachieu'} <= w
+@intent('shift_comparison', _SHIFT_WORDS + ' sovoi chenh hon kem tang giam phantram thi hay', lambda w, p: {'casang', 'cachieu'} <= w
         and 'phantram' in w and bool({'sovoi', 'chenh', 'hon', 'kem', 'tang', 'giam'} & w))
 def run_shift_comparison(ctx, parsed):
     period = _one_period(parsed)
@@ -420,16 +444,16 @@ _THRESHOLD_WORDS = 'dem so ma ca tu trolen troxuong dong gte lte gt lt tren duoi
 _OPERATORS = {'>=': '>=', '>': '>', '<': '<', '<=': '<='}
 
 
-@intent('days_over_amount', _THRESHOLD_WORDS + ' doanhthu', lambda w, p: 'ngay' in w and 'doanhthu' in w,
-        numbers=(1, 1))
+@intent('days_over_amount', _THRESHOLD_WORDS + ' doanhthu ban duoc cuahang', lambda w, p: 'ngay' in w and bool({'doanhthu', 'ban'} & w)
+        and 'don' not in w and 'nao' not in w, numbers=(1, 1))
 def run_days_over(ctx, parsed):
-    period, op = _one_period(parsed), operator(parsed.words)
-    if op is None or not ctx.has('semantic.eligible_sales_lines', 'line_amount', 'order_date'):
+    period, op, source = _one_period(parsed), operator(parsed.words), daily_revenue_relation(ctx)
+    if op is None or source is None:
         return None
     if ctx.outside(period.first, period.last):
         return unanswerable(NO_DATA)
     sql = ('SELECT COUNT(*) FROM (SELECT CAST(d AS DATE) AS day FROM generate_series(?::DATE, ?::DATE, INTERVAL 1 DAY) t(d)) '
-           'LEFT JOIN (SELECT CAST(order_date AS DATE) AS day, SUM(line_amount) AS total FROM semantic.eligible_sales_lines '
+           f'LEFT JOIN (SELECT CAST(order_date AS DATE) AS day, SUM({source[1]}) AS total FROM {source[0]} '
            'GROUP BY 1) USING (day) '
            f'WHERE COALESCE(total, 0) {_OPERATORS[op]} ?')
     return number(ctx.one(sql, period.first, period.last, parsed.numbers[0])[0])
@@ -439,12 +463,12 @@ def run_days_over(ctx, parsed):
         numbers=(1, 1))
 def run_orders_over(ctx, parsed):
     period, op = _one_period(parsed), operator(parsed.words)
-    if op is None or not ctx.has('semantic.eligible_orders', 'revenue', 'order_date'):
+    if op is None or not amount_column(ctx) or not ctx.has('semantic.eligible_orders', 'order_date'):
         return None
     if ctx.outside(period.first, period.last):
         return unanswerable(NO_DATA)
     return number(ctx.one('SELECT COUNT(*) FROM semantic.eligible_orders WHERE CAST(order_date AS DATE) BETWEEN ? AND ? '
-                          f'AND revenue {_OPERATORS[op]} ?', period.first, period.last, parsed.numbers[0])[0])
+                          f'AND {amount_column(ctx)} {_OPERATORS[op]} ?', period.first, period.last, parsed.numbers[0])[0])
 
 
 # ---- products, groups and units ------------------------------------------------------------------------------------
@@ -504,7 +528,7 @@ def run_unit_total(ctx, parsed):
     return number(quantity(row[0] or 0))
 
 
-@intent('size_total', 'so ban duoc tong cong ra @u @z cong moi mon mathang',
+@intent('size_total', 'so ban duoc tong cong ra @u @z cong moi mon mathang ca cac tat loai uong do',
         lambda w, p: '@u' in w and '@z' in w, entities=('unit', 'size'))
 def run_size_total(ctx, parsed):
     period, size = _one_period(parsed), _entity(parsed, 'size')
@@ -517,7 +541,7 @@ def run_size_total(ctx, parsed):
     return number(quantity(row[0] or 0))
 
 
-@intent('group_revenue', 'doanhthu cua tong cong ban duoc tien thu ve ra @g',
+@intent('group_revenue', 'doanhthu cua tong cong ban duoc tien thu ve ra @g cac mathang hang',
         lambda w, p: '@g' in w and ('doanhthu' in w or 'tien' in w) and 'phantram' not in w, entities=('group',))
 def run_group_revenue(ctx, parsed):
     period, group = _one_period(parsed), _entity(parsed, 'group')
@@ -530,7 +554,7 @@ def run_group_revenue(ctx, parsed):
     return number(whole(row[0] or 0))
 
 
-@intent('group_share', 'doanhthu cua tong chiem phantram trong @g dong gop cua ca tiem tile',
+@intent('group_share', 'doanhthu cua tong chiem phantram trong @g dong gop cua ca tiem tile titrong ti',
         lambda w, p: '@g' in w and 'doanhthu' in w and 'phantram' in w, entities=('group',))
 def run_group_share(ctx, parsed):
     period, group = _one_period(parsed), _entity(parsed, 'group')
@@ -543,7 +567,7 @@ def run_group_share(ctx, parsed):
     return {'type': 'percent', 'answer': float(row[0])} if row and row[0] is not None else None
 
 
-@intent('top_products', 'top chay nhat ban nhieu hot mathang hang mon la gi nhung nao lietke cho cac @n',
+@intent('top_products', 'top chay nhat ban nhieu hot mathang hang mon la gi chi nhung nao lietke cho cac @n',
         lambda w, p: bool({'chay', 'hot', 'top'} & w) or ('ban' in w and 'nhieu' in w and 'nhat' in w and bool({'mathang', 'hang', 'mon'} & w)),
         numbers=(0, 1))
 def run_top_products(ctx, parsed):
@@ -576,8 +600,8 @@ def run_unsold(ctx, parsed):
     return number(ctx.one('SELECT COUNT(*) FROM semantic.unsold_products(?, ?)', period.first, period.last)[0])
 
 
-@intent('products_in_orders', 'baonhieu mathang xuathien itnhat @n don khacnhau trolen duoc mua o co tong',
-        lambda w, p: 'mathang' in w and bool({'xuathien', 'mua'} & w) and 'don' in w, numbers=(1, 1))
+@intent('products_in_orders', 'baonhieu mathang xuathien itnhat @n don khacnhau trolen duoc mua o co tong it nhat tu mat gte dem so la',
+        lambda w, p: 'mathang' in w and bool({'xuathien', 'mua', 'mat'} & w) and 'don' in w, numbers=(1, 1))
 def run_products_in_orders(ctx, parsed):
     period, op = _one_period(parsed), operator(parsed.words)
     if op != '>=' or not ctx.has('semantic.eligible_sales_lines', 'order_id', 'product_name', 'order_date'):
@@ -591,12 +615,13 @@ def run_products_in_orders(ctx, parsed):
                           period.first, period.last, parsed.numbers[0])[0])
 
 
-@intent('price_change_effect', 'so ban ra trong ketu ngay tanggia len tu voi ngaytruoc ngay do luong tinh theo @u @p @n '
+@intent('price_change_effect', 'so ban ra trong ketu ngay tanggia len tu voi ngaytruoc ngay do luong tinh theo @u @p @n @t '
         'hay giam tang nhieu it hon thay doi phantram lientruoc truoc duoc sovoi vao ke dong',
-        lambda w, p: '@p' in w and 'tanggia' in w and 'phantram' in w, numbers=(2, 4), entities=('product',))
+        lambda w, p: '@p' in w and 'tanggia' in w and 'phantram' in w, periods=(1, 2), numbers=(2, 6), entities=('product',),
+        optional=('unit',))
 def run_price_change(ctx, parsed):
-    day = next((p for p in parsed.periods if p.kind == 'day'), None)
-    if day is None or len(parsed.periods) != 1:
+    day = parsed.periods[0]
+    if day.kind != 'day' or any(p != day for p in parsed.periods):
         return None
     sizes = [int(n) for n, nxt in zip(parsed.numbers, parsed.next_word) if nxt == 'ngay']
     if len(sizes) != 2 or sizes[0] != sizes[1] or not 1 <= sizes[0] <= 90:
@@ -607,6 +632,302 @@ def run_price_change(ctx, parsed):
     if after is None or before is None or not before:
         return None
     return {'type': 'percent', 'answer': percent(after - before, before)}
+
+
+# ---- customers -----------------------------------------------------------------------------------------------------
+
+_CUSTOMER_HINTS = ('khach', 'customer', 'kh_', '_kh', 'ma_kh', 'ten_kh')
+NOT_RECORDED = 'The data does not record this information.'
+
+
+def customer_amount(ctx):
+    """Order-level amount column when semantic.eligible_orders identifies customers, else None."""
+    if ctx.has('semantic.eligible_orders', 'customer_key', 'customer_name', 'order_date'):
+        return amount_column(ctx)
+    return None
+
+
+def no_customers(ctx):
+    """True when the bundle has rulebook-ready orders and nothing in its sources looks like a customer."""
+    return (ctx.has('semantic.eligible_orders', 'order_date') and customer_amount(ctx) is None
+            and not ctx.source_mentions(_CUSTOMER_HINTS))
+
+
+_CUSTOMER_WORDS = 'khach hang ai la mua nhieu tien nhat chi tieu cao tong lietke top cho nao @n co'
+
+
+@intent('top_customers_by_money', _CUSTOMER_WORDS, lambda w, p: ('khach' in w or {'ai', 'mua'} <= w) and bool({'nhat', 'top'} & w)
+        and bool({'tien', 'tieu'} & w) and not {'don', 'lan'} & w, numbers=(0, 1))
+def run_top_customers(ctx, parsed):
+    period, amount = _one_period(parsed), customer_amount(ctx)
+    k = int(parsed.numbers[0]) if parsed.numbers else 1
+    if no_customers(ctx):
+        return unanswerable(NOT_RECORDED)
+    if amount is None or not 1 <= k <= 20:
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    rows = ctx.rows(f'SELECT MIN(customer_name) FROM semantic.eligible_orders WHERE customer_key IS NOT NULL '
+                    f'AND CAST(order_date AS DATE) BETWEEN ? AND ? GROUP BY customer_key '
+                    f'ORDER BY SUM({amount}) DESC, customer_key LIMIT {k}', period.first, period.last)
+    names = [r[0] for r in rows]
+    if len(names) != k or None in names:
+        return None
+    return {'type': 'string', 'answer': names[0]} if not parsed.numbers else {'type': 'list', 'answer': names}
+
+
+@intent('top_customer_by_orders', 'khach hang ai la mua nhieu don lan nhat tinh theo so cho nao',
+        lambda w, p: 'khach' in w and 'nhat' in w and bool({'don', 'lan'} & w) and not {'tien', 'tieu'} & w)
+def run_top_customer_orders(ctx, parsed):
+    period = _one_period(parsed)
+    if no_customers(ctx):
+        return unanswerable(NOT_RECORDED)
+    if customer_amount(ctx) is None:
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    rows = ctx.rows('SELECT MIN(customer_name) FROM semantic.eligible_orders WHERE customer_key IS NOT NULL '
+                    'AND CAST(order_date AS DATE) BETWEEN ? AND ? GROUP BY customer_key '
+                    'ORDER BY COUNT(*) DESC, customer_key LIMIT 2', period.first, period.last)
+    return {'type': 'string', 'answer': rows[0][0]} if rows and rows[0][0] else None
+
+
+_MIN_ORDERS_WORDS = 'khach mua tu @n don trolen itnhat co baonhieu so la hang da'
+
+
+@intent('customers_with_min_orders', _MIN_ORDERS_WORDS, lambda w, p: 'khach' in w and 'don' in w and 'phantram' not in w,
+        numbers=(1, 1))
+def run_customers_min_orders(ctx, parsed):
+    period = _one_period(parsed)
+    if operator(parsed.words) != '>=':
+        return None
+    if no_customers(ctx):
+        return unanswerable(NOT_RECORDED)
+    if customer_amount(ctx) is None:
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    return number(ctx.one('SELECT COUNT(*) FROM (SELECT customer_key FROM semantic.eligible_orders '
+                          'WHERE customer_key IS NOT NULL AND CAST(order_date AS DATE) BETWEEN ? AND ? '
+                          'GROUP BY customer_key HAVING COUNT(*) >= ?)', period.first, period.last, parsed.numbers[0])[0])
+
+
+@intent('customers_min_orders_share', _MIN_ORDERS_WORDS + ' chiem phantram tile trong',
+        lambda w, p: 'khach' in w and 'don' in w and 'phantram' in w, numbers=(1, 1))
+def run_customers_share(ctx, parsed):
+    period = _one_period(parsed)
+    if operator(parsed.words) != '>=':
+        return None
+    if no_customers(ctx):
+        return unanswerable(NOT_RECORDED)
+    if customer_amount(ctx) is None:
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    many, total = ctx.one('SELECT COUNT(*) FILTER (WHERE n >= ?), COUNT(*) FROM (SELECT COUNT(*) AS n '
+                          'FROM semantic.eligible_orders WHERE customer_key IS NOT NULL '
+                          'AND CAST(order_date AS DATE) BETWEEN ? AND ? GROUP BY customer_key)',
+                          parsed.numbers[0], period.first, period.last)
+    value = percent(many, total)
+    return None if value is None else {'type': 'percent', 'answer': value}
+
+
+# ---- debt ----------------------------------------------------------------------------------------------------------
+
+_DEBT_WORDS = 'khach con no cua hang tong cong baonhieu tien tinh den het ngay cong so la chua tra thieu voi va'
+
+
+def _debt_day(ctx, parsed):
+    """The day a debt question is asked at, when the bundle publishes debt views; else None."""
+    if 'semantic.debt_as_of' not in ctx.functions or len(parsed.periods) != 1 or parsed.periods[0].kind != 'day':
+        return None
+    return parsed.periods[0].first
+
+
+@intent('total_debt', _DEBT_WORDS, lambda w, p: 'no' in w and 'khach' in w and bool({'tien', 'tong'} & w)
+        and 'khach' in w and not any(a == 'baonhieu' and b == 'khach' for a, b in zip(p.words, p.words[1:])))
+def run_total_debt(ctx, parsed):
+    day = _debt_day(ctx, parsed)
+    if day is None:
+        return None
+    return number(whole(ctx.one('SELECT COALESCE(SUM(outstanding), 0) FROM semantic.debt_as_of(?)', day)[0]))
+
+
+@intent('debtor_count', _DEBT_WORDS + ' hoi', lambda w, p: 'no' in w and 'khach' in w and 'tien' not in w and 'nhat' not in w
+        and any((a in ('baonhieu', 'so') and b == 'khach') for a, b in zip(p.words, p.words[1:])))
+def run_debtor_count(ctx, parsed):
+    day = _debt_day(ctx, parsed)
+    if day is None or 'customer_id' not in ctx.columns.get('semantic.debt_as_of', set()):
+        return None
+    return number(ctx.one('SELECT COUNT(DISTINCT customer_id) FROM semantic.debt_as_of(?) WHERE customer_id IS NOT NULL', day)[0])
+
+
+@intent('top_debtors', _DEBT_WORDS + ' cho bang top ai nao dang nhieu nhat lon kem moi nguoi tung nhung lietke @n',
+        lambda w, p: 'no' in w and 'khach' in w and 'nhat' in w or ('no' in w and 'lon' in w and 'khach' in w), numbers=(1, 1))
+def run_top_debtors(ctx, parsed):
+    day, k = _debt_day(ctx, parsed), int(parsed.numbers[0])
+    if day is None or not 1 <= k <= 20 or not ctx.has('semantic.orders', 'order_id', 'customer_name'):
+        return None
+    if 'customer_id' not in ctx.columns.get('semantic.debt_as_of', set()):
+        return None
+    rows = ctx.rows('SELECT MIN(o.customer_name), SUM(d.outstanding) FROM semantic.debt_as_of(?) d '
+                    'JOIN semantic.orders o USING (order_id) WHERE d.customer_id IS NOT NULL GROUP BY d.customer_id '
+                    f'ORDER BY SUM(d.outstanding) DESC, d.customer_id LIMIT {k}', day)
+    if len(rows) != k or any(r[0] is None for r in rows):
+        return None
+    return {'type': 'table', 'answer': {'columns': ['khach_hang', 'so_tien_no'], 'rows': [[r[0], whole(r[1])] for r in rows]}}
+
+
+@intent('debt_collected', 'tien khach tra no bot cac don mua chiu duoc cong thu hoi tu cua hang tong cong baonhieu ve',
+        lambda w, p: 'no' in w and bool({'tra', 'hoi', 'thu'} & w) and '@k' not in w)
+def run_debt_collected(ctx, parsed):
+    period = _one_period(parsed)
+    if not ctx.has('semantic.debt_repayments', 'repayment_date', 'amount'):
+        return None
+    if ctx.outside(period.first, period.last):
+        return unanswerable(NO_DATA)
+    return number(whole(ctx.one('SELECT COALESCE(SUM(amount), 0) FROM semantic.debt_repayments '
+                                'WHERE repayment_date BETWEEN ? AND ?', period.first, period.last)[0]))
+
+
+@intent('customer_debt_flow', 'khach @k ghi no them baonhieu va tra duoc da bot mua chiu nhieu thutu nhu cua hang co tien '
+        'tra loi hai so ghi',
+        lambda w, p: '@k' in w and 'no' in w and 'them' in w and 'tra' in w, entities=('customer',))
+def run_customer_debt_flow(ctx, parsed):
+    period, customer = _one_period(parsed), _entity(parsed, 'customer')
+    words = parsed.words
+    if not (ctx.has('semantic.debt_added', 'customer_id', 'order_date') and ctx.has('semantic.debt_repayments', 'customer_id')):
+        return None
+    if words.index('them') > words.index('tra'):
+        return None
+    ids = ctx.rows("SELECT DISTINCT customer_id FROM semantic.orders WHERE customer_id IS NOT NULL AND "
+                   "replace(lower(strip_accents(trim(regexp_replace(customer_name, '\\s+', ' ', 'g')))), 'đ', 'd') = ?",
+                   ' '.join(prepare(customer.name).split()))
+    if len(ids) != 1:
+        return None
+    key = ids[0][0]
+    added = ctx.one('SELECT COALESCE(SUM(added_debt), 0) FROM semantic.debt_added WHERE customer_id = ? '
+                    'AND order_date BETWEEN ? AND ?', key, period.first, period.last)[0]
+    repaid = ctx.one('SELECT COALESCE(SUM(amount), 0) FROM semantic.debt_repayments WHERE customer_id = ? '
+                     'AND repayment_date BETWEEN ? AND ?', key, period.first, period.last)[0]
+    return {'type': 'list', 'answer': [whole(added), whole(repaid)]}
+
+
+# ---- stock ---------------------------------------------------------------------------------------------------------
+
+_STOCK_WORDS = 'ton kho cuoi ngay hom nay trong con lai het la baonhieu @p @u luc duoc mathang hang tinh den may kho'
+
+
+def _stock_rows(ctx, parsed):
+    """Rows of semantic.stock_snapshot for the named product when the question is about its stock date, else None."""
+    if not ctx.has('semantic.stock_snapshot', 'product_name', 'stock_base_units', 'stock_date') or len(parsed.periods) != 1:
+        return None
+    day, product = parsed.periods[0], _entity(parsed, 'product')
+    if day.kind != 'day':
+        return None
+    rows = ctx.rows('SELECT stock_base_units, stock_date, whole_large_units, loose_base_units FROM semantic.stock_snapshot '
+                    'WHERE product_name = ?' if ctx.has('semantic.stock_snapshot', 'whole_large_units') else
+                    'SELECT stock_base_units, stock_date, NULL, NULL FROM semantic.stock_snapshot WHERE product_name = ?',
+                    product.name)
+    if len(rows) != 1 or rows[0][1] != day.first:
+        return None
+    return rows[0]
+
+
+@intent('stock_units', _STOCK_WORDS, lambda w, p: '@p' in w and bool({'ton', 'kho'} & w) and 'chan' not in w,
+        entities=('product',), optional=('unit',))
+def run_stock_units(ctx, parsed):
+    row = _stock_rows(ctx, parsed)
+    return None if row is None or row[0] is None else number(quantity(row[0]))
+
+
+@intent('stock_large_units', _STOCK_WORDS + ' chan le', lambda w, p: '@p' in w and 'chan' in w and bool({'ton', 'kho'} & w),
+        entities=('product',), optional=('unit',))
+def run_stock_large(ctx, parsed):
+    row = _stock_rows(ctx, parsed)
+    if row is None or row[2] is None:
+        return None
+    return {'type': 'list', 'answer': [quantity(row[2]), quantity(row[3])]}
+
+
+# ---- sales channel and payment method ------------------------------------------------------------------------------
+
+_CHANNELS = {'chphone': {'phone', 'dien thoai'}, 'chstore': {'store', 'tai quay', 'quay'}, 'chzalo': {'zalo oa', 'zalo_oa', 'zalo'}}
+_PAYMENTS = {'pcash': {'cash', 'tien mat'}, 'pcod': {'cod', 'thu ho cod', 'thu ho'},
+             'ptransfer': {'transfer', 'chuyen khoan'}, 'pewallet': {'ewallet', 'vi dien tu', 'e wallet'}}
+_BY_ORDER_WORDS = ('doanhthu cac don ban qua tra bang tong chiem phantram trong moi loai baonhieu va so lanluot sovoi '
+                   'bao la cho tile cua mot nhieu tien ti titrong')
+
+
+def _label(ctx, column, wanted):
+    """The bundle's own label for a channel or payment method, when exactly one matches."""
+    if not ctx.has('semantic.eligible_orders', column):
+        return None
+    found = [r[0] for r in ctx.rows(f'SELECT DISTINCT {column} FROM semantic.eligible_orders WHERE {column} IS NOT NULL')
+             if ' '.join(prepare(r[0]).split()) in wanted]
+    return found[0] if len(found) == 1 else None
+
+
+_HINTS = {'channel': ('kenh', 'channel', 'nguon'), 'payment_method': ('thanh_toan', 'payment', 'hinh_thuc', 'pttt')}
+
+
+def _by_order(ctx, parsed, table, column):
+    """(period, labels in question order) for a channel or payment question, or None when a label is not in the bundle.
+
+    Returns the string 'absent' when the bundle has rulebook-ready orders but neither the column nor any source column
+    that looks like it: the data does not record it.
+    """
+    period = _one_period(parsed)
+    if (ctx.has('semantic.eligible_orders', 'order_date') and not ctx.has('semantic.eligible_orders', column)
+            and not ctx.source_mentions(_HINTS[column])):
+        return 'absent'
+    marks = [w for w in parsed.words if w in table]
+    labels = [_label(ctx, column, table[w]) for w in marks]
+    if not marks or len(set(marks)) != len(marks) or None in labels or amount_column(ctx) is None:
+        return None
+    return period, labels
+
+
+def _order_part(ctx, column, label, period):
+    return Decimal(str(ctx.one(f'SELECT COALESCE(SUM({amount_column(ctx)}), 0) FROM semantic.eligible_orders '
+                               f'WHERE {column} = ? AND CAST(order_date AS DATE) BETWEEN ? AND ?',
+                               label, period.first, period.last)[0]))
+
+
+def _order_total(ctx, period):
+    return Decimal(str(ctx.one(f'SELECT COALESCE(SUM({amount_column(ctx)}), 0) FROM semantic.eligible_orders '
+                               'WHERE CAST(order_date AS DATE) BETWEEN ? AND ?', period.first, period.last)[0]))
+
+
+def _order_group(table, column, name, prefix):
+    marks = frozenset(table)
+
+    @intent(name, _BY_ORDER_WORDS + ' ' + ' '.join(table), lambda w, p: bool(w & marks) and not w & _OTHER[prefix]
+            and bool({'doanhthu', 'tien'} & w))
+    def run(ctx, parsed):
+        found = _by_order(ctx, parsed, table, column)
+        if found is None:
+            return None
+        if found == 'absent':
+            return unanswerable(NOT_RECORDED)
+        period, labels = found
+        if ctx.outside(period.first, period.last):
+            return unanswerable(NO_DATA)
+        parts = [_order_part(ctx, column, label, period) for label in labels]
+        if 'phantram' in parsed.words:
+            if len(parts) != 1:
+                return None
+            value = percent(parts[0], _order_total(ctx, period))
+            return None if value is None else {'type': 'percent', 'answer': value}
+        if len(parts) == 1:
+            return number(whole(parts[0]))
+        return {'type': 'list', 'answer': [whole(v) for v in parts]}
+    return run
+
+
+_OTHER = {'channel': frozenset(_PAYMENTS), 'payment': frozenset(_CHANNELS)}
+run_channel = _order_group(_CHANNELS, 'channel', 'channel_revenue', 'channel')
+run_payment = _order_group(_PAYMENTS, 'payment_method', 'payment_revenue', 'payment')
 
 
 def answer(question, as_of_date, ctx):
@@ -631,7 +952,8 @@ def answer(question, as_of_date, ctx):
             continue
         if not item.numbers[0] <= len(parsed.numbers) <= item.numbers[1]:
             continue
-        if tuple(sorted(e.kind for e in (parsed.entities or []))) != item.entities:
+        kinds = tuple(sorted({(e.kind, e.name) for e in (parsed.entities or []) if e.kind not in item.optional}))
+        if tuple(kind for kind, _ in kinds) != item.entities:
             continue
         if words - item.words - FILLER - COMMON - SLOTS:
             continue

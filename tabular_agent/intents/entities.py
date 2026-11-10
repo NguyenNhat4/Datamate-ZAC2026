@@ -13,7 +13,7 @@ _UNIT_LEADS = frozenset({'so', 'nhieu', 'nhiu', 'may', 'theo', 'mot', 'bn', 'bnh
 
 @dataclass(frozen=True)
 class Entity:
-    """A catalogue name found in a question: kind is product, group, unit or size."""
+    """A catalogue name found in a question: kind is product, group, unit, size or customer."""
     kind: str
     name: str
     unit: str = ''
@@ -23,18 +23,24 @@ class Catalog:
     """Folded names of the products, groups and base units of one bundle."""
 
     def __init__(self, ctx):
-        self.products, self.groups, self.units = {}, {}, {}
+        self.products, self.groups, self.units, self.customers = {}, {}, {}, {}
         relation = 'semantic.product_quantities'
+        # The base unit when the bundle converts quantities; else the unit a sales line is written in.
+        unit_column = next((c for c in ('base_unit', 'unit') if ctx.has(relation, c)), None)
         if ctx.has(relation, 'product_name'):
-            unit = 'MIN(base_unit)' if ctx.has(relation, 'base_unit') else 'NULL'
+            unit = f'CASE WHEN COUNT(DISTINCT {unit_column}) = 1 THEN MIN({unit_column}) END' if unit_column else 'NULL'
             self._add(self.products, ctx.rows(f'SELECT product_name, {unit} FROM {relation} '
                                               'WHERE product_name IS NOT NULL GROUP BY 1'))
         if ctx.has(relation, 'product_group'):
             self._add(self.groups, ctx.rows(f'SELECT DISTINCT product_group, NULL FROM {relation} '
                                             'WHERE product_group IS NOT NULL'))
-        if ctx.has(relation, 'base_unit'):
-            self._add(self.units, ctx.rows(f'SELECT DISTINCT base_unit, NULL FROM {relation} WHERE base_unit IS NOT NULL'))
-        self.longest = max([len(k) for d in (self.products, self.groups, self.units) for k in d] or [1])
+        if unit_column:
+            self._add(self.units, ctx.rows(f'SELECT DISTINCT {unit_column}, NULL FROM {relation} WHERE {unit_column} IS NOT NULL'))
+        if ctx.has('semantic.orders', 'customer_name'):
+            self._add(self.customers, ctx.rows('SELECT DISTINCT customer_name, NULL FROM semantic.orders '
+                                               'WHERE customer_name IS NOT NULL'))
+            self.customers = {k: v for k, v in self.customers.items() if len(k) >= 2}
+        self.longest = max([len(k) for d in (self.products, self.groups, self.units, self.customers) for k in d] or [1])
 
     @staticmethod
     def _add(table, rows):
@@ -50,7 +56,7 @@ class Catalog:
             del table[key]
 
     def mask(self, tokens):
-        """Replace the names found in a token list by @p (product), @g (group), @u (unit) and @z (size).
+        """Replace the names found in a token list by @p (product), @g (group), @u (unit), @z (size) and @k (customer).
 
         Args:
             tokens: Output of text.prepare(...).split().
@@ -81,13 +87,20 @@ class Catalog:
                 out.append('@p')
                 i += length
                 continue
+            hit = self._longest(self.customers, tokens, i)
+            if hit:
+                length, entity = hit
+                found.append(Entity('customer', entity.name))
+                out.append('@k')
+                i += length
+                continue
             if token == 'size' and i + 1 < len(tokens) and tokens[i + 1] in ('m', 'l'):
                 found.append(Entity('size', tokens[i + 1]))
                 out.append('@z')
                 i += 2
                 continue
             hit = self._longest(self.units, tokens, i)
-            if hit and i > 0 and self._lead(tokens[i - 1]):
+            if hit and i > 0 and self._lead(tokens[i - 1]) and not (tokens[i:i + 1] == ['phan'] and tokens[i + 1:i + 2] == ['tram']):
                 length, entity = hit
                 found.append(Entity('unit', entity.name))
                 out.append('@u')

@@ -16,6 +16,8 @@ import time
 
 from .contracts import read_jsonl
 from .evaluate import score
+from .contracts import validate_answer
+from .intents import Context as IntentContext, answer as intent_answer
 from .sql_agent import answer_question_sql, find_bundles
 from .model import create_model, create_openai_model, openai_model_name
 from .telemetry import tracing
@@ -64,6 +66,35 @@ def time_limit(seconds):
         signal.signal(signal.SIGALRM, previous)
 
 
+def answer_by_intent(contexts, bundles, question, emit):
+    """Answer a question with a deterministic intent when one claims it.
+
+    Args:
+        contexts: Dictionary of opened intents.Context objects by business id; filled on demand.
+        bundles: Mapping from business id to its prepared bundle directory.
+        question: Question record with business_id, question and as_of_date.
+        emit: Event callback; receives an intent event for a claimed question, or an intent_error event.
+
+    Returns:
+        A validated answer dictionary, or None when no intent claims the question, the claimed intent cannot answer
+        from this bundle, or the layer failed. None leaves the question to the model; a failure never stops the run.
+    """
+    try:
+        business = question['business_id']
+        if business not in contexts:
+            contexts[business] = IntentContext(bundles[business])
+        hit = intent_answer(question['question'], question['as_of_date'], contexts[business])
+        if hit is None:
+            return None
+        result, name = hit
+        answer = validate_answer(result)
+    except Exception as error:
+        emit({'stage': 'intent_error', 'error': f'{type(error).__name__}: {error}'})
+        return None
+    emit({'stage': 'intent', 'intent': name, 'answer': answer})
+    return answer
+
+
 def local_base_url():
     """Return the URL of the local benchmark model server started by scripts/serve-local.sh.
 
@@ -103,6 +134,9 @@ def parser():
         command.add_argument('--max-tokens', type=int, default=2048)
         command.add_argument('--question-timeout', type=float, default=60)
         command.add_argument('--model-timeout', type=float, default=120)
+        command.add_argument('--no-intents', action='store_true',
+                             help='Ask the model every question; by default recurring question kinds are answered by '
+                                  'fixed queries (tabular_agent/intents)')
         command.add_argument('--telemetry', action='store_true', help='Send traces to local Phoenix on port 6006')
         command.add_argument('--run-timeout', type=float, default=21600)
         command.add_argument('--context', type=int, default=16384)
@@ -271,7 +305,7 @@ def run(args):
     manifest = {'revision': revision, 'python': sys.version.split()[0], 'model': model_name if args.provider == 'openai' else local_name,
                 'dirty': dirty, 'dependencies': dependencies, 'provider': args.provider,
                 'base_url': base if args.provider == 'local' else None, 'agent_mode': 'sql',
-                'prepared': args.prepared, 'seed': args.seed,
+                'prepared': args.prepared, 'intents': not args.no_intents, 'seed': args.seed,
                 'temperature': args.temperature if args.provider == 'local' else None,
                 'partition': args.partition, 'partition_seed': args.partition_seed, 'sample': args.sample,
                 'max_steps': args.max_steps, 'max_tokens': args.max_tokens, 'question_timeout': args.question_timeout,
@@ -280,6 +314,7 @@ def run(args):
     (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     rulebook = (split / 'rulebook.md').read_text(encoding='utf-8')
     bundles = find_bundles(args.prepared)
+    contexts = {}
     predictions = []
     timings = []
     stop_at = time.monotonic() + args.run_timeout
@@ -346,8 +381,10 @@ def run(args):
                         if question['business_id'] not in bundles:
                             answer = {'type': 'abstain', 'reason': 'No prepared data for this business.'}
                         else:
-                            answer = answer_question_sql(model, question, business, bundles[question['business_id']],
-                                                         rulebook, max_steps=min(args.max_steps, 6), emit=emit)
+                            answer = None if args.no_intents else answer_by_intent(contexts, bundles, question, emit)
+                            if answer is None:
+                                answer = answer_question_sql(model, question, business, bundles[question['business_id']],
+                                                             rulebook, max_steps=min(args.max_steps, 6), emit=emit)
                 except QuestionDeadlineExceeded:
                     answer = {'type': 'abstain', 'reason': 'Question deadline exceeded'}
                 except Exception as error:
@@ -366,6 +403,8 @@ def run(args):
             submission.flush()
             os.fsync(submission.fileno())
             print(f"[{index+1}/{len(questions)}] {question['id']}: {row['type']}", flush=True)
+    for context in contexts.values():
+        context.close()
     if args.command == 'bench':
         report = score(questions, predictions, read_jsonl(split / 'answers.jsonl'))
         (output / 'score.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

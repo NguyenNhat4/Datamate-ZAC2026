@@ -22,6 +22,15 @@ RULES = """
 """
 
 
+class PaymentLabels(unittest.TestCase):
+    def test_cash_on_delivery_is_recognised_in_every_written_form(self):
+        from tabular_agent.preparation.views import is_cod
+        for label in ("COD", "cod", "Thu hộ (COD)", "Thu hộ", "Giao hàng thu tiền"):
+            self.assertTrue(is_cod(label), label)
+        for label in ("Tiền mặt", "Chuyển khoản", "Ghi nợ", "Ví điện tử", "cash", "transfer"):
+            self.assertFalse(is_cod(label), label)
+
+
 class StatusMapping(unittest.TestCase):
     def test_exact_vocabulary_covers_four_states(self):
         self.assertEqual(canonical_status("Đã hoàn thành"), "completed")

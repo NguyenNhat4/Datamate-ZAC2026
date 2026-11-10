@@ -19,7 +19,7 @@ SYNONYMS = {
     'dc': 'duoc', 'ko': 'khong', 'k': 'khong', 'hok': 'khong', 'hong': 'khong', 'kg': 'kg',
     'kh': 'khach', 'sp': 'san pham', 'sl': 'so luong', 'ck': 'chuyen khoan', 'tm': 'tien mat',
     'vs': 'voi', 'z': 'vay', 'bill': 'don', 'order': 'don', 'orders': 'don', 'khachs': 'khach',
-    'may': 'bao nhieu', 'ty': 'ti', 'ngoai': 'ngoai',
+    'may': 'bao nhieu', 'ty': 'ti', 'ngoai': 'ngoai', 'cod': 'pcod', 'j': 'gi',
 }
 
 # Multi-word phrases joined into one canonical word, so that the definitions can treat them as a unit.
@@ -33,7 +33,8 @@ _PHRASES = tuple((re.compile(r'\b' + pattern + r'\b'), word) for pattern, word i
     ('lien tuc', 'lientuc'), ('lien tiep', 'lientiep'), ('lien nhau', 'liennhau'), ('thoi gian', 'thoigian'),
     ('thu tu', 'thutu'), ('liet ke', 'lietke'), ('best seller', 'chay'), ('xuat hien', 'xuathien'),
     ('khac nhau', 'khacnhau'), ('ke tu', 'ketu'), ('tang gia', 'tanggia'), ('len gia', 'tanggia'), ('doi gia', 'tanggia'),
-    ('ngay truoc', 'ngaytruoc')))
+    ('ngay truoc', 'ngaytruoc'), ('ti trong', 'titrong'), ('dien thoai', 'chphone'), ('tai quay', 'chstore'), ('zalo oa', 'chzalo'),
+    ('tien mat', 'pcash'), ('chuyen khoan', 'ptransfer'), ('vi dien tu', 'pewallet')))
 
 # "mặt hàng ế" (unsold); a lone "e" is otherwise "em".
 _UNSOLD = re.compile(r'\b(mathang|hang|mon) (?:bi )?e\b')
@@ -52,7 +53,7 @@ def strip_accents(text):
 
 
 def collapse(word):
-    """Remove Telex typing residue: doubled letters for marks (dd, aa, oo, ee), w for horns, and a trailing tone key."""
+    """Remove the Telex typing residue of the marks: dd, aa, oo, ee become one letter and a w after a, o or u goes."""
     for pattern, replacement in _COLLAPSES:
         word = pattern.sub(replacement, word)
     return word
@@ -77,6 +78,7 @@ def prepare(question):
     """
     text = strip_accents(question)
     text = re.sub(r'\s*/\s*', '/', text)
+    text = re.sub(r'(?<=[a-z])/(?=[a-z])', ' ', text)
     text = text.replace('>=', ' gte ').replace('<=', ' lte ').replace('≥', ' gte ').replace('≤', ' lte ')
     text = text.replace('>', ' gt ').replace('<', ' lt ').replace('%', ' phan tram ')
     out = []
