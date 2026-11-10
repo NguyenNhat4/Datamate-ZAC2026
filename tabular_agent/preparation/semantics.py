@@ -37,6 +37,10 @@ def _source_tokens(value: str) -> set[str]:
         except UnicodeError:
             pass
         name = re.sub(r"\.(?:xlsx|csv|sqlite|sqlite3|db)$", "", name, flags=re.I)
+        # A README names a monthly series by a pattern ("BanHang_T<tháng>_<năm>.xlsx"); its files carry the month
+        # and year ("BanHang_T1_2025.xlsx"). Both reduce to the series name.
+        name = re.sub(r"_?(?:T|Thang|Thg)?<[^>]*>", "", name, flags=re.I)
+        name = re.sub(r"_(?:T|Thang|Thg)\d{1,2}(?:_20\d{2})?$", "", name, flags=re.I).rstrip("_")
         name = re.sub(r"_(?:\d{1,2}|20\d{2})$", "", name)
         if name:
             result.add(_token(name))
@@ -154,18 +158,18 @@ def readme_unit_conversions(readme: str) -> dict[str, Any]:
 # These are label aliases, not arbitrary substring matches. Broad labels such
 # as Tiền, Tổng tiền, Nội dung, Mã GD and Ngày require scoped documentation.
 _ALIASES: dict[str, tuple[str, ...]] = {
-    "order_id": ("order_id", "orderid", "invoice_id", "MaHoaDon", "mã hóa đơn", "mã đơn", "mã đơn hàng", "mã bill", "so hoa don", "số hđ"),
-    "line_number": ("line_number", "line_no", "SoThuTu", "STT", "TT dòng", "thứ tự", "No."),
+    "order_id": ("order_id", "orderid", "invoice_id", "MaHoaDon", "mã hóa đơn", "mã đơn", "mã đơn hàng", "mã bill", "so hoa don", "số hđ", "đơn số", "số đơn"),
+    "line_number": ("line_number", "line_no", "SoThuTu", "STT", "TT dòng", "thứ tự", "No.", "dòng"),
     "product_id": ("product_id", "sku", "MaHangHoa", "ma_sp", "mã hàng", "mã sản phẩm", "mã sp", "mã món", "mã sản phẩm bán", "mã HH", "mã mặt hàng", "mã hàng bán", "mã SKU", "ID SP"),
-    "product_name": ("product_name", "product", "TenHang", "tên hàng", "tên sản phẩm", "tên SP", "tên hàng hóa", "tên mặt hàng", "tên món", "hàng bán", "mặt hàng", "chi tiết hàng", "món"),
+    "product_name": ("product_name", "product", "TenHang", "tên hàng", "tên sản phẩm", "tên SP", "tên hàng hóa", "tên mặt hàng", "tên món", "hàng bán", "mặt hàng", "chi tiết hàng", "món", "hàng hóa"),
     "customer_id": ("customer_id", "MaKhachHang", "mã khách hàng", "mã KH", "ma_kh", "mã KH mua", "mã khách mua", "mã khách lẻ/sỉ", "số KH"),
     "customer_name": ("customer_name", "TenKH", "tên khách", "tên khách hàng", "khách hàng (tên)", "khách", "bên mua", "đối tác"),
-    "order_date": ("order_date", "NgayLap", "NgayBan", "ngày bán", "ngày đặt hàng", "ngày đặt", "ngày mua", "ngày giao dịch", "ngày tháng"),
+    "order_date": ("order_date", "NgayLap", "NgayBan", "ngày bán", "ngày đặt hàng", "ngày đặt", "ngày mua", "ngày giao dịch", "ngày tháng", "ngày HĐ", "ngày hóa đơn"),
     "created_at": ("created_at", "ThoiGianLap", "thời gian tạo đơn", "thời gian tạo", "giờ tạo đơn"),
-    "status": ("status", "TinhTrang", "trang_thai", "trạng thái", "trạng thái đơn", "trạng thái đơn hàng", "trạng thái xử lý", "tình trạng đơn", "kết quả", "xử lý", "ghi chú TT"),
+    "status": ("status", "TinhTrang", "trang_thai", "trạng thái", "trạng thái đơn", "trạng thái đơn hàng", "trạng thái xử lý", "tình trạng đơn", "kết quả", "xử lý", "ghi chú TT", "trạng thái giao"),
     "quantity": ("quantity", "qty", "SoLuong", "Sluong", "Slg", "SL", "S.L", "số lượng", "số lượng bán", "số lượng hàng", "số lượng sản phẩm", "SL bán", "SL nhập"),
-    "base_quantity": ("base_quantity", "SLQuyDoi", "số lượng quy đổi", "SL quy đổi", "SL quy ra lẻ", "SL cơ bản", "số lượng lẻ", "SL lẻ", "quy ra ĐV lẻ", "SLNhapQuyDoi", "SL nhập (ĐVT cơ bản)"),
-    "unit": ("unit", "DonViTinh", "DonVi", "đơn vị tính", "đơn vị (tính)", "ĐVT", "DVT", "ĐV tính", "Đ.vị", "ĐVT nhập"),
+    "base_quantity": ("base_quantity", "SLQuyDoi", "số lượng quy đổi", "SL quy đổi", "SL quy ra lẻ", "SL cơ bản", "số lượng lẻ", "SL lẻ", "quy ra ĐV lẻ", "SLNhapQuyDoi", "SL nhập (ĐVT cơ bản)", "SL (ĐV cơ bản)"),
+    "unit": ("unit", "DonViTinh", "DonVi", "đơn vị tính", "đơn vị (tính)", "ĐVT", "DVT", "ĐV tính", "Đ.vị", "ĐVT nhập", "ĐV"),
     "line_amount": ("line_amount", "TriGia", "trị giá", "ThanhTien", "thành tiền", "thành tiền (đ)", "T.Tiền", "Amount", "tiền bán"),
     "unit_price": ("unit_price", "GiaDonVi", "đơn giá", "đơn giá bán", "don_gia", "đơn giá (đ)", "giá sản phẩm", "giá bán lẻ", "giá 1 đv", "giá đơn vị", "giá lẻ", "Price"),
     "unit_cost": ("unit_cost", "GiaVonLucBan", "GiaVonHang", "giá vốn", "giá vốn lúc bán", "giá vốn hiện tại"),

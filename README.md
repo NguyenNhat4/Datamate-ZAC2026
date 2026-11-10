@@ -1,9 +1,10 @@
 # Tabular analysis assistant
 
-Answers Vietnamese questions about a business's tabular files (CSV, Excel, SQLite) with a typed answer, in two stages:
+Answers Vietnamese questions about a business's tabular files (CSV, Excel, SQLite) with a typed answer, in three stages:
 
 1. **Preparation** (`make prepare`, [tabular_agent/preparation/](tabular_agent/preparation/)) reads every file of each business, without reading questions or answers. For each business it publishes a DuckDB **bundle**: clean tables, rulebook-ready `semantic` relations (orders and sales lines with the rulebook's order rules applied), and a documented schema. See [data preparation](docs/data-preparation.md).
-2. **Answering** ([tabular_agent/sql_agent.py](tabular_agent/sql_agent.py)) gives a local model the split's rulebook, the business README, the bundle's schema, explicit dates derived from `as_of_date`, and the question. The model sends one read-only `SELECT` at a time, sees the result, and ends with a typed JSON answer. Code checks every query and every answer; see [one question](docs/diagrams/02-question-flow.md).
+2. **Fixed question kinds** ([tabular_agent/intents/](tabular_agent/intents/)) answer the recurring kinds of question without the model: revenue, orders, cancellations, comparisons with an earlier period, shifts, rankings of products and customers, debt, stock and more. A question is recognised only when every one of its words is explained by the kind's vocabulary, a period or a number; the answer comes from a fixed query over the bundle's rulebook-ready relations. Anything not recognised goes to stage 3. The kinds are checked against the training reference answers with `scripts/oracle-replay.py`, which calls no model; see [the intent record](docs/fix/2026-11-11_intent_layer/README.md).
+3. **Model answering** ([tabular_agent/sql_agent.py](tabular_agent/sql_agent.py)) gives a local model the split's rulebook, the business README, the bundle's schema, explicit dates derived from `as_of_date`, and the question. The model sends one read-only `SELECT` at a time, sees the result, and ends with a typed JSON answer. Code checks every query and every answer; see [one question](docs/diagrams/02-question-flow.md).
 
 The data contract, answer types and the reference evaluation profile are in [project-overview.md](project-overview.md). The current goal, scores, backlog and lessons are in [the fix index](docs/fix/README.md). How to measure a commit is in [the runbook](docs/fix/RUNBOOK.md).
 
@@ -48,6 +49,7 @@ make predict SPLIT=data/public_test BUNDLES=artifacts/prepared-r2-public
 
 - `BUNDLES` is one folder written by `make prepare`. A question whose business has no bundle there is answered `abstain` without an error, so check that the folder holds every business of the split.
 - The defaults are the benchmark settings: temperature 0, at most six steps, 60 seconds per question, all selected questions (`LIMIT=0`), the server on `LOCAL_PORT` (18234) with the model `LOCAL_MODEL_ALIAS` (`local-coder-7b`). Pass other CLI options with `ARGS="..."`, for example `ARGS="--question-id q_... --question-id q_..."`.
+- Recurring question kinds are answered by fixed queries before the model is asked. `--no-intents` turns this off, to measure the model alone; `--intents-only` keeps only the fixed kinds and abstains on every other question without calling the model, so that every submitted answer comes from a reviewed query. A run's log shows an `intent` event for each fixed-kind answer, with the periods, names and numbers it read; the manifest records `intents` and `intents_only`.
 - Each run writes `questions.jsonl`, `submission.jsonl` (flushed after every question), `manifest.json` (commit, settings, dependency versions), `timings.json`, `timing-summary.json`, and one log per question under `logs/`. A log holds the stages `schema`, `memory_step` (model reply), `sql`, `observation` (result or rejection) and `question_timing` (id, final answer, seconds). A benchmark also writes `score.json`.
 - Reference answers are read only by `bench`, after all questions are answered. The scorer (`tabular_agent/evaluate.py`) is an **internal approximation**, not the official evaluator.
 - `make bench` against a long-running server is quicker to start, but the server's prompt cache makes replies depend on earlier requests. For comparable numbers, use the runbook: one fresh server per set, from a worktree pinned at the measured commit.
@@ -62,7 +64,7 @@ make predict SPLIT=data/public_test BUNDLES=artifacts/prepared-r2-public
 
 Answers go to `RESULT_DIR/submission.jsonl` (default `/result`); `RESULT_DIR` must be empty or absent. Logs go to `RESULT_DIR/logs/`: one file per question, whose last event holds the id, final answer and elapsed seconds, plus `pipeline.log` (phase times) and `prepare.log`.
 
-The whole run is kept within `RUN_SECONDS` (default 21,600, the reference profile's six hours, including preparation and model loading). Answering stops `STOP_MARGIN_SECONDS` (default 300) before that, keeping every answer already written. A business that preparation blocks gets `abstain` for its questions. Set `BASE_URL` (and `MODEL`) to use an already running server instead of starting one. The server binary, device (`LOCAL_DEVICE`, default `Vulkan1`) and weights are those of this machine; a container for other hardware must provide its own.
+Extra arguments go to `cli predict`: `./predict.sh --intents-only` answers only what the fixed question kinds claim and abstains on the rest without asking the model. The whole run is kept within `RUN_SECONDS` (default 21,600, the reference profile's six hours, including preparation and model loading). Answering stops `STOP_MARGIN_SECONDS` (default 300) before that, keeping every answer already written. A business that preparation blocks gets `abstain` for its questions. Set `BASE_URL` (and `MODEL`) to use an already running server instead of starting one. The server binary, device (`LOCAL_DEVICE`, default `Vulkan1`) and weights are those of this machine; a container for other hardware must provide its own.
 
 ```bash
 DATA_DIR=data/public_test RESULT_DIR=runs/public-dry WORK_DIR=$PWD/artifacts/prepared-dry ./predict.sh
@@ -85,13 +87,14 @@ Importing `smolagents` loads `.env` into the environment. Local runs therefore r
 | Path | Role |
 |---|---|
 | `tabular_agent/preparation/` | Source readers, value parsers, column semantics, rulebook-ready views and the preparation pipeline; optional local-model help for ambiguous layouts |
+| `tabular_agent/intents/` | Fixed question kinds: `text.py` (typing residue, abbreviations), `periods.py` (the rulebook's time rules, Tết from the lunar calendar), `entities.py` (product, group, unit and customer names of a bundle), `catalogue.py` (the kinds and their queries), `context.py` (read-only bundle access) |
 | `tabular_agent/sql_agent.py` | Prompt, query checks (one allowlisted `SELECT`, no system date, unready sales tables refused) and answer checks |
 | `tabular_agent/cli.py` | `prepare`, `profile`, `bench`, `predict`, `score` and `doctor` |
 | `tabular_agent/model.py` | Local and OpenAI clients |
 | `tabular_agent/contracts.py`, `evaluate.py` | Answer types and the internal scorer |
 | `tabular_agent/telemetry.py`, `phoenix_local.py` | Optional tracing |
 | `streamlit_app.py` | The UI |
-| `predict.sh`, `scripts/` | Submission entrypoint; model server settings (`local-model.sh`), server and benchmark launchers, dry-run report |
+| `predict.sh`, `scripts/` | Submission entrypoint; model server settings (`local-model.sh`), server and benchmark launchers, dry-run report; `oracle-replay.py` (intents against training references, no model), `claim-coverage.py` (counts of claimed questions of any split, no answers read), `bundle-invariants.py` (consistency of prepared bundles), `draw-samples.py` |
 | `tests/answering/`, `tests/preparation/` | Synthetic checks |
 
 Answer types are `number`, `percent`, `string`, `date`, `boolean`, `list`, `table`, `unanswerable` and `abstain`. `unanswerable` means the data cannot support an answer; `abstain` means the system chooses not to answer.
@@ -101,6 +104,14 @@ Answer types are `number`, `percent`, `string`, `date`, `boolean`, `list`, `tabl
 ```bash
 make check   # compiles every module and checks whitespace
 make test    # tests/answering and tests/preparation
+```
+
+Checks that need prepared bundles but no model (they print counts only; see the [runbook](docs/fix/RUNBOOK.md), section 12):
+
+```bash
+.venv-native/bin/python scripts/oracle-replay.py --prepared artifacts/prepared-r4-train      # open training questions against their references
+.venv-native/bin/python scripts/bundle-invariants.py artifacts/prepared-r4-public            # lines vs orders, states, dates
+.venv-native/bin/python scripts/claim-coverage.py --split data/public_test --prepared artifacts/prepared-r4-public
 ```
 
 The tests use invented data and no model, so they check mechanisms, not answer quality. One preparation test is an expected failure on purpose (backlog B17 in the fix index).

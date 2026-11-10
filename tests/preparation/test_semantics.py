@@ -64,6 +64,21 @@ class Semantics(unittest.TestCase):
         result = self.propose(["Nội dung", "Mã GD", "SL"], "Sales_2026.xlsx::2026-01", readme)
         self.assertEqual(result["grain"], "order_item")
 
+    def test_a_readme_pattern_for_monthly_files_scopes_every_month(self):
+        readme = ("## Cột trong `BanHang_T<tháng>_<năm>.xlsx`, sheet `DonHang_ChiTiet`\n"
+                  "- **Tổng tiền**: thành tiền sau giảm\n- **Mã đơn hàng**: mã đơn\n")
+        for month in ("BanHang_T1_2025.xlsx", "BanHang_T12_2026.xlsx", "BanHang_Thang03_2025.xlsx"):
+            proposal = propose_table(["Mã đơn hàng", "Tổng tiền"], source_name=month + "::DonHang_ChiTiet",
+                                     readme=readme, rulebook=RULES)
+            self.assertEqual(proposal["roles"], {"order_id": 0, "line_amount": 1}, month)
+
+    def test_common_vietnamese_headers_of_a_sales_sheet_get_their_roles(self):
+        proposal = propose_table(["Đơn số", "Dòng", "Ngày HĐ", "Hàng hóa", "ĐV", "S.L", "Thành tiền (đ)", "Trạng thái giao"],
+                                 source_name="BanHang.xlsx::BanHang", readme="", rulebook=RULES)
+        self.assertEqual(proposal["grain"], "order_item")
+        self.assertEqual(proposal["roles"], {"order_id": 0, "line_number": 1, "order_date": 2, "product_name": 3, "unit": 4,
+                                             "quantity": 5, "line_amount": 6, "status": 7})
+
     def test_orderless_records_never_gain_artificial_order_identity(self):
         result = self.propose(["Tên hàng", "Ngày bán", "Số lượng", "Thành tiền"])
         self.assertEqual(result["grain"], "sale_recording")

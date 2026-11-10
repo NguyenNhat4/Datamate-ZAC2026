@@ -16,6 +16,12 @@ from tabular_agent.preparation.parsers import (
 
 
 class ParserTests(unittest.TestCase):
+    def test_a_documented_status_stays_text_whatever_its_label_suggests(self):
+        # "Tiến độ" contains the word "tiền" (money) only by accident; the README says it is the order status.
+        parser = infer_parser("Tiến độ", ["Xong", "Hủy", "Đang giao"], description="trạng thái đơn")
+        self.assertEqual((parser["kind"], parser["status"]), ("text", "validated"))
+        self.assertEqual(infer_parser("Tiền ship", ["15.000"])["kind"], "decimal")
+
     def test_names_preserve_meaning_and_are_sql_friendly(self):
         self.assertEqual(normalize_name("  Số lượng (quy đổi) "), "so_luong_quy_doi")
         self.assertEqual(normalize_name("Đơn Giá"), "don_gia")

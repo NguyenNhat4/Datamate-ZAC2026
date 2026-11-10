@@ -88,6 +88,29 @@ class RunnerTests(unittest.TestCase):
             last = json.loads((out / 'logs' / '000000.jsonl').read_text().splitlines()[-1])
             self.assertEqual((last['stage'], last['id'], last['answer']['answer']), ('question_timing', 'q1', 2))
 
+    def test_intents_only_abstains_without_calling_the_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            split = write_split(root)
+            out = root / 'out'
+            args = parser().parse_args(['predict', '--split', str(split), '--output', str(out), '--model', 'stub',
+                                        '--prepared', str(root / 'bundles'), '--intents-only'])
+            with patch('tabular_agent.cli.create_model', return_value=object()), \
+                 patch('tabular_agent.cli.find_bundles', return_value={'shop': root / 'bundles' / 'shop'}), \
+                 patch('tabular_agent.cli.answer_by_intent', return_value=None), \
+                 patch('tabular_agent.cli.answer_question_sql') as model_path, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run(args), 0)
+            rows = [json.loads(line) for line in (out / 'submission.jsonl').read_text().splitlines()]
+            self.assertEqual(rows[0]['type'], 'abstain')
+            self.assertIn('intents-only', rows[0]['reason'])
+            model_path.assert_not_called()
+            self.assertTrue(json.loads((out / 'manifest.json').read_text())['intents_only'])
+            both = parser().parse_args(['predict', '--split', str(split), '--output', str(root / 'out2'), '--model', 'stub',
+                                        '--prepared', str(root / 'bundles'), '--intents-only', '--no-intents'])
+            with self.assertRaisesRegex(ValueError, 'exclude each other'):
+                run(both)
+
     def test_bench_and_predict_need_prepared_bundles(self):
         for command in ('bench', 'predict'):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):

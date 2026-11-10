@@ -382,6 +382,8 @@ def infer_parser(label: str, samples: list[Any], *, epoch: str | None = None, ye
     quantity = bool(words & {"quantity", "qty", "sl", "stock"}) or any(token in label_key for token in ("so luong", "ton kho", "ton dau", "ton cuoi", "so vien", "so goi"))
     numeric = bool(words & {"amount", "price", "total", "cost", "revenue", "money", "debit", "credit", "discount", "balance", "vat", "gia", "tien", "phi", "no", "von", "percent", "rate", "doanhthu"}) or any(token in label_key for token in ("doanh thu", "chiet khau", "thanh tien", "loi nhuan", "ty le"))
     descriptive = bool(words & {"ten", "name", "description", "note", "notes", "email", "status", "state", "method", "reason", "cach", "kieu", "loai"}) or any(token in label_key for token in ("ghi chu", "trang thai", "hinh thuc", "phuong thuc", "dia chi", "hoat chat")) or label_key in {"unit", "units", "don vi", "don vi tinh", "dvt"}
+    # A label such as "Tiến độ" holds words of a number ("tiền") only by accident when the README says it is a status.
+    descriptive = descriptive or text_key(description).startswith(("trang thai", "kenh ban", "hinh thuc thanh toan", "phuong thuc thanh toan"))
     if identifier:
         parser.update(kind="identifier", status="validated")
         return parser

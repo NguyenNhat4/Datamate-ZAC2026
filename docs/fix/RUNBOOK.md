@@ -42,13 +42,14 @@ A valid run's `manifest.json` shows all of the following:
 
 ## 2. Bundles
 
-The current generation is `artifacts/prepared-r2-*`:
+The current generation is `artifacts/prepared-r4-*` (11 November):
 
 | Folder | Businesses | Used by |
 |---|---|---|
-| `prepared-r2-dev` | biz_104, 106, 107, 111, 112, 120, 121, 127 | sample10, setA, setB, types16 |
-| `prepared-r2-unseen` | the other 22 training businesses | unseen48, holdout48 |
-| `prepared-r2-public` | the 14 public-test businesses | public predictions |
+| `prepared-r4-train` | all 30 training businesses | every training set, including gate100 and work100; `oracle-replay.py` |
+| `prepared-r4-public` | the 14 public-test businesses | public predictions; `claim-coverage.py` |
+
+Earlier generations, kept for the older runs: `r2` (`-dev`, `-unseen`, `-public`; sample10, setA, setB, types16, unseen48 and holdout48 were measured on it), and `r3` (`-train`, `-public`: `r2` plus the cash-on-delivery fix only). `r4` adds four more preparation fixes ([intent record](2026-11-11_intent_layer/README.md), 2.8). Sets measured before 11 November were measured on `r2`; to compare with them, prepare their businesses at the code being measured and say so.
 
 **`--prepared` takes one folder.** A question whose business has no bundle in that folder is answered `abstain` with the reason "No prepared data for this business." No error is raised (`tabular_agent/cli.py:352`). A sample that spans both training groups, such as the proposed gate100 and work100, needs one folder with all 30 businesses (section 7).
 
@@ -211,6 +212,10 @@ Each run folder is named `<set>-<tag>`. Only the manifest links a tag to its cod
 | `r2s2b` | `5e1507b` | `prepared-r2-dev` / `prepared-r2-unseen` | rankings record 4 |
 | `e1` | `506d567` | `prepared-r2-dev` (sample10 only). The public dry run `public-dry-e1` was stopped after 49 questions; its run-time bundles are in `artifacts/prepared-dry-e1/prepared` | [entrypoint record](2026-11-10_submission_entrypoint/README.md) |
 | `c1` | `b2657c4` | `prepared-r2-dev` (sample10 only); a check that the cleanup changed no answers | [cleanup record](2026-11-10_cleanup_plan/README.md) 6.3 |
+| `r3s0` | `37ee7e9` | `prepared-r2-train` (work100 only), model alone | [gate and samples record](2026-11-10_gate_and_work_samples/README.md) 4 |
+| `r4i1` | `f70a679` | `prepared-r3-train` (work100); **invalid**: the bundle was left open, so every model-routed question abstained | [intent record](2026-11-11_intent_layer/README.md) 2.9 |
+| `r4m`, `r4i2` | `83dca1a` | `prepared-r4-train` (work100): model alone, and kinds then model | intent record 3.3 |
+| `r4i3`, `r4k` | `9b8ad23` | `prepared-r4-train`: work100 (kinds then model); gate100 `r4i3` (kinds then model) and `r4k` (`--intents-only`) | intent record 3.3 |
 
 Older runs (`fix2` to `fix7`, `step1*`, `v2`, `baseline`, `check-*`) ran at the server's default temperature (0.8) on trees with uncommitted changes. Their manifests name the base commit only.
 
@@ -242,7 +247,7 @@ nohup env DATA_DIR="$MAIN/data/public_test" RESULT_DIR="$MAIN/runs/public-dry-$T
   - Phase times: `cat "$MAIN/artifacts/prepared-dry-$TAG/pipeline.log"`.
   - Questions answered so far: `wc -l < "$MAIN/runs/public-dry-$TAG/submission.jsonl"`.
 - **Stopping early.** Stop the answering process by its PID, which `pgrep -af 'tabular_agent.cli predict'` lists. `predict.sh` then stops the server itself.
-- **Cost.** About 6.5 minutes of preparation, then answering. The answering time is an estimate from the sets' medians (about two hours); it has not been measured yet.
+- **Cost.** About 6.5 minutes of preparation, then answering. The answering time is an estimate from the sets' medians (about two hours); with the fixed question kinds on, a question they claim takes about 0.1 s, so the model sees fewer questions. Neither time has been measured on a full run.
 - **Work folder.** Reusing a work folder reuses its bundles, so the preparation time is not measured.
 - **What to read.** Read the run as counts only:
 
@@ -253,3 +258,27 @@ nohup env DATA_DIR="$MAIN/data/public_test" RESULT_DIR="$MAIN/runs/public-dry-$T
   This prints answered and abstained per business, abstention reasons, errors, timing, and whether the run-time bundles match the last prepared public bundles. It never prints question text or answer values.
 - **What not to read.** Do not read public questions or answers to choose fixes; the public test is not a development set.
 - **Uploading.** The run's `submission.jsonl` is in the upload format. Uploading it is a team decision. Record each upload in the index's upload log.
+
+## 12. Checks that need bundles but no model
+
+Since 11 November the runner answers recurring question kinds with fixed queries before it asks the model ([intent record](2026-11-11_intent_layer/README.md)). These three scripts check that layer and the bundles without a server. All three print counts and findings about bundles; none prints a reference answer or, for the public split, a question.
+
+```bash
+# 1. The kinds against the open training questions and their references.
+.venv-native/bin/python scripts/oracle-replay.py --prepared artifacts/prepared-r4-train
+#    --show N prints N wrong claims per kind (question, our answer, reference); --unclaimed N prints N unclaimed
+#    questions; --business biz_104 limits it to one business. gate100 and holdout48 are never loaded.
+
+# 2. Consistency of a bundle folder: line revenue equals order revenue month by month, states agree with
+#    counts_as_sale, no missing sales dates, no month without sales.
+.venv-native/bin/python scripts/bundle-invariants.py artifacts/prepared-r4-public
+
+# 3. How many questions of a split the kinds claim, per business (no answers read, no text printed).
+.venv-native/bin/python scripts/claim-coverage.py --split data/public_test --prepared artifacts/prepared-r4-public
+```
+
+- **Reading the replay.** "Wrong" must be 0. A wrong claim is either a parser error (the question is not of that kind), a query that applies the rulebook wrongly, or a bundle defect; the 11 November replay found one of each of the last two (the cash-on-delivery label "Thu hộ (COD)", record 3.6). Fix the cause; do not add a refusal for the one question.
+- **Reading the coverage.** It is a count of recognised questions, not a score. On training it is the share the kinds explain; on the public split it shows how far the public questions are from the training templates. Do not print or read public questions to raise it (section 11, "What not to read").
+- **Model-only and kinds-only runs.** `cli bench` and `cli predict` accept `--no-intents` (the model answers every question) and `--intents-only` (the fixed kinds answer what they claim, everything else abstains, and the model is never asked, so no server is needed). A set run with the kinds on mostly measures the kinds; the manifest's `intents` and `intents_only` fields say which it was. Report the model-only result next to it when the model is what you are judging.
+- **Opening a bundle twice.** DuckDB shares one locked database instance per file within a process. Code that opens a bundle for the kinds must close it before the model path opens it (`answer_by_intent` does, and `tests/answering/test_intents.py` checks it). A set that ran with the bundle left open abstained on every question that reached the model, with `InvalidInputException` in the abstention reason.
+

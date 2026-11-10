@@ -16,6 +16,8 @@ import time
 
 from .contracts import read_jsonl
 from .evaluate import score
+from .contracts import validate_answer
+from .intents import Context as IntentContext, answer as intent_answer
 from .sql_agent import answer_question_sql, find_bundles
 from .model import create_model, create_openai_model, openai_model_name
 from .telemetry import tracing
@@ -64,6 +66,42 @@ def time_limit(seconds):
         signal.signal(signal.SIGALRM, previous)
 
 
+def answer_by_intent(catalogs, bundles, question, emit):
+    """Answer a question with a deterministic intent when one claims it.
+
+    Args:
+        catalogs: Dictionary of entity catalogues by business id, filled on first use. Only these are kept between
+            questions: the bundle is opened for the attempt and closed before the model may open it, because DuckDB
+            shares one locked database instance among the connections of a process.
+        bundles: Mapping from business id to its prepared bundle directory.
+        question: Question record with business_id, question and as_of_date.
+        emit: Event callback; receives an intent event for a claimed question, or an intent_error event.
+
+    Returns:
+        A validated answer dictionary, or None when no intent claims the question, the claimed intent cannot answer
+        from this bundle, or the layer failed. None leaves the question to the model; a failure never stops the run.
+    """
+    business, context = question['business_id'], None
+    try:
+        context = IntentContext(bundles[business])
+        if business in catalogs:
+            context.catalog = catalogs[business]
+        hit = intent_answer(question['question'], question['as_of_date'], context)
+        catalogs[business] = context.catalog
+        if hit is None:
+            return None
+        result, name, spec = hit
+        answer = validate_answer(result)
+    except Exception as error:
+        emit({'stage': 'intent_error', 'error': f'{type(error).__name__}: {error}'})
+        return None
+    finally:
+        if context is not None:
+            context.close()
+    emit({'stage': 'intent', 'intent': name, 'spec': spec, 'answer': answer})
+    return answer
+
+
 def local_base_url():
     """Return the URL of the local benchmark model server started by scripts/serve-local.sh.
 
@@ -103,6 +141,12 @@ def parser():
         command.add_argument('--max-tokens', type=int, default=2048)
         command.add_argument('--question-timeout', type=float, default=60)
         command.add_argument('--model-timeout', type=float, default=120)
+        command.add_argument('--no-intents', action='store_true',
+                             help='Ask the model every question; by default recurring question kinds are answered by '
+                                  'fixed queries (tabular_agent/intents)')
+        command.add_argument('--intents-only', action='store_true',
+                             help='Answer only the questions the fixed kinds claim and abstain on the rest, without '
+                                  'asking the model: every answer comes from a reviewed query')
         command.add_argument('--telemetry', action='store_true', help='Send traces to local Phoenix on port 6006')
         command.add_argument('--run-timeout', type=float, default=21600)
         command.add_argument('--context', type=int, default=16384)
@@ -224,6 +268,8 @@ def run(args):
         raise ValueError('Timeouts and step/token limits must be positive; limit cannot be negative')
     if not math.isfinite(args.temperature) or args.temperature < 0:
         raise ValueError('Temperature must be zero or positive')
+    if args.no_intents and args.intents_only:
+        raise ValueError('--no-intents and --intents-only exclude each other')
     if args.provider == 'openai':
         if args.base_url:
             raise ValueError('--base-url is for local servers; OpenAI uses https://api.openai.com/v1')
@@ -271,7 +317,7 @@ def run(args):
     manifest = {'revision': revision, 'python': sys.version.split()[0], 'model': model_name if args.provider == 'openai' else local_name,
                 'dirty': dirty, 'dependencies': dependencies, 'provider': args.provider,
                 'base_url': base if args.provider == 'local' else None, 'agent_mode': 'sql',
-                'prepared': args.prepared, 'seed': args.seed,
+                'prepared': args.prepared, 'intents': not args.no_intents, 'intents_only': args.intents_only, 'seed': args.seed,
                 'temperature': args.temperature if args.provider == 'local' else None,
                 'partition': args.partition, 'partition_seed': args.partition_seed, 'sample': args.sample,
                 'max_steps': args.max_steps, 'max_tokens': args.max_tokens, 'question_timeout': args.question_timeout,
@@ -280,6 +326,7 @@ def run(args):
     (output / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     rulebook = (split / 'rulebook.md').read_text(encoding='utf-8')
     bundles = find_bundles(args.prepared)
+    catalogs = {}
     predictions = []
     timings = []
     stop_at = time.monotonic() + args.run_timeout
@@ -346,8 +393,12 @@ def run(args):
                         if question['business_id'] not in bundles:
                             answer = {'type': 'abstain', 'reason': 'No prepared data for this business.'}
                         else:
-                            answer = answer_question_sql(model, question, business, bundles[question['business_id']],
-                                                         rulebook, max_steps=min(args.max_steps, 6), emit=emit)
+                            answer = None if args.no_intents else answer_by_intent(catalogs, bundles, question, emit)
+                            if answer is None and args.intents_only:
+                                answer = {'type': 'abstain', 'reason': 'No fixed question kind answers this question (intents-only run).'}
+                            elif answer is None:
+                                answer = answer_question_sql(model, question, business, bundles[question['business_id']],
+                                                             rulebook, max_steps=min(args.max_steps, 6), emit=emit)
                 except QuestionDeadlineExceeded:
                     answer = {'type': 'abstain', 'reason': 'Question deadline exceeded'}
                 except Exception as error:

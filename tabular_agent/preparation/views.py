@@ -14,6 +14,13 @@ _COD_LABELS = {'cod', 'thu ho', 'giao hang thu tien'}
 _MARKETPLACE_WORDS = {'shopee', 'lazada', 'tiki', 'tiktok', 'sendo', 'tmdt', 'marketplace', 'ecommerce', 'san'}
 
 
+def is_cod(label):
+    """True for a payment label that means cash on delivery: "COD", "Thu hộ (COD)", "Thu hộ", "Giao hàng thu tiền"."""
+    key = text_key(str(label))
+    words = re.findall(r'[a-z0-9]+', key)
+    return key in _COD_LABELS or 'cod' in words or words[:2] == ['thu', 'ho']
+
+
 def _q(name):
     return '"' + str(name).replace('"', '""') + '"'
 
@@ -178,7 +185,7 @@ def publish_debt_views(connection, relations, semantic, rulebook):
         return []
     methods = _labels(connection, 'semantic.orders', 'payment_method')
     debt = [label for label in methods if text_key(str(label)) in _DEBT_LABELS]
-    cod = [label for label in methods if text_key(str(label)) in _COD_LABELS]
+    cod = [label for label in methods if is_cod(label)]
     excluded = [_in('o.payment_method', cod)] if cod else []
     if 'channel' in orders['roles']:
         channels = _labels(connection, 'semantic.orders', 'channel')
