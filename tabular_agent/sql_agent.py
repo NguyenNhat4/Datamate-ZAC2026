@@ -813,9 +813,11 @@ def answer_question_sql(model, question, business, bundle, rulebook, *, max_step
     bundle = Path(bundle)
     schema = json.loads((bundle / 'schema.json').read_text(encoding='utf-8'))
     readme = Path(business) / 'README.md'
+    # One thread: with parallel execution, rows that tie in an ORDER BY ... LIMIT come back in a different order on
+    # each run, so the same question could get a different answer. Queries here take well under a second.
     connection = duckdb.connect(str(bundle / 'data.duckdb'), read_only=True,
                                 config={'enable_external_access': False, 'autoinstall_known_extensions': False,
-                                        'autoload_known_extensions': False, 'memory_limit': '1GB', 'threads': 2})
+                                        'autoload_known_extensions': False, 'memory_limit': '1GB', 'threads': 1})
     try:
         connection.execute("SET search_path='semantic,clean'")
         # strip_accents keeps the letter đ, so it is folded separately.

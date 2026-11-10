@@ -182,6 +182,10 @@ class SqlAnswering(unittest.TestCase):
         answer, _ = self.ask(rate, final({"type": "percent", "answer": 31.82}), final({"type": "percent", "answer": 31.82}))
         self.assertEqual(answer, {"type": "percent", "answer": 31.82})
 
+    def test_queries_run_on_one_thread_so_tied_rows_keep_their_order(self):
+        _, model = self.ask(sql("SELECT current_setting('threads') AS threads"), final({"type": "abstain", "reason": "x"}))
+        self.assertIn("threads\n1\n", model.feedback[1])
+
     def test_step_limit_ends_in_an_abstention(self):
         answer, _ = self.ask(*["no block here"] * 6)
         self.assertEqual(answer["type"], "abstain")
