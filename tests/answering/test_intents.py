@@ -276,6 +276,18 @@ class FixedQueries(unittest.TestCase):
         self.assertEqual(self.ask('doanh thu dịp Tết 2026 là bao nhiêu')[1], {'type': 'number', 'answer': 100000})
         self.assertIsNone(self.ask('doanh thu dịp Tết 2024 là bao nhiêu'))
 
+    def test_information_no_shop_records_is_unanswerable_but_sugar_is_not_a_street(self):
+        for question in ('có bao nhiêu khách ở đường Trần Não', 'tháng 3/2026 khách nữ mua tổng cộng bao nhiêu tiền',
+                         'nhân viên nào có tay nghề cao nhất', 'khách quý mến nhân viên nào nhất'):
+            self.assertEqual(self.ask(question)[1]['type'], 'unanswerable', question)
+        # "đường" as sugar, and an ordinary revenue question, are left alone.
+        self.assertIsNone(self.ask('khách nào mua đường nhiều nhất tháng 3/2026'))
+        self.assertEqual(self.ask('doanh thu tháng 3/2026')[0], 'revenue')
+
+    def test_month_over_month_trend_uses_the_words_before_and_after_as_a_relation(self):
+        self.assertEqual(self.ask('từ tháng 2/2026 đến tháng 3/2026, doanh thu tháng sau có luôn cao hơn tháng trước không?')[1],
+                         {'type': 'boolean', 'answer': True})
+
     def test_a_period_outside_the_data_is_unanswerable_not_zero(self):
         self.assertEqual(self.ask('doanh thu tháng 1/2026 là bao nhiêu')[1]['type'], 'unanswerable')
 

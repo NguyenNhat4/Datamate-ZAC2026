@@ -311,10 +311,11 @@ def month_list(parsed):
     Accepted: every month named one by one (two or more), "từ tháng A đến tháng B" (a range of whole months), and
     "N tháng liền nhau kết thúc ở tháng B" (N months ending at B).
     """
-    months = parsed.periods
+    words = parsed.words
+    # "tháng sau có luôn cao hơn tháng trước": the words "tháng trước" are a relation between the months, not a period.
+    months = [m for m in parsed.periods if not ('sau' in words and m.kind == 'last_month')]
     if not months or any(m.kind != 'month' or not m.year_given for m in months):
         return None
-    words = parsed.words
     if len(months) == 1 and 'ketthuc' in words and len(parsed.numbers) == 1 and 2 <= parsed.numbers[0] <= 12:
         last = months[0].first
         return [P.month_at(last, -i) for i in range(int(parsed.numbers[0]) - 1, -1, -1)]
@@ -1062,6 +1063,30 @@ def resolve_tet(ctx, parsed):
     return Parsed(parsed.question, parsed.today, parsed.words, resolved, parsed.numbers, parsed.next_word, parsed.entities)
 
 
+# What no shop records: asking for it is asking for something the data cannot support (rulebook section 7). Each
+# entry is a phrase pattern on the accent-folded question and the source-column names that would make the question
+# answerable after all; a bundle with such a column is left to the model. "Đường" is also sugar, so the street
+# patterns need "ở đường" or "khách đường" and never match "mua đường".
+_ABSENT = (
+    ('the street a customer lives in', r'\b(?:o|nha o|tai) duong\b|\bkhach(?: hang)? duong\b',
+     ('dia_chi', 'addr', 'address', 'duong', 'khu_vuc', 'street')),
+    ('the gender of a customer', r'\bkhach(?: hang)? (?:nam|nu)\b', ('gioi_tinh', 'gender', 'sex')),
+    ('how customers or staff rate each other',
+     r'\b(?:le phep|tan tam|chu dao|lanh nghe|tay nghe|quy men)\b|\bkhach hay khen\b|\bkhen nhan vien\b',
+     ('danh_gia', 'khen', 'rating', 'feedback', 'hai_long')),
+    ('the reason of a return or a cancellation', r'\b(?:vi loi|mua nham|giao tre)\b', ('ly_do', 'reason')),
+)
+
+
+def absent_attribute(question, ctx):
+    """An unanswerable answer for a question about information no shop records, when the bundle has no such column."""
+    folded = ' ' + prepare(question) + ' '
+    for label, pattern, hints in _ABSENT:
+        if re.search(pattern, folded) and not ctx.source_mentions(hints):
+            return unanswerable(f'The data does not record {label}.')
+    return None
+
+
 def has_toppings_in_names(ctx):
     """True when product names of the sales lines join a dish and its toppings with " + " (cached per bundle)."""
     if not hasattr(ctx, 'toppings_in_names'):
@@ -1086,6 +1111,9 @@ def answer(question, as_of_date, ctx):
         answer it from this bundle. The spec lists the periods (ISO first and last day), names and numbers the intent
         read from the question, so that a log shows what was understood. None means: leave the question to the model.
     """
+    refusal = absent_attribute(question, ctx)
+    if refusal is not None:
+        return refusal, 'absent_attribute', {'periods': [], 'entities': [], 'numbers': []}
     if not hasattr(ctx, 'catalog'):
         ctx.catalog = Catalog(ctx)
     plain = analyze(question, as_of_date)
