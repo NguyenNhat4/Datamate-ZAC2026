@@ -6,12 +6,35 @@ _provider = None
 
 
 def is_enabled():
+    """Report whether this module currently owns an active tracing provider.
+
+    Returns:
+        True inside an enabled tracing context, otherwise False.
+    """
     return _provider is not None
 
 
 @contextmanager
 def tracing(enabled=False, *, exporter=None):
-    """Instrument smolagents for one run; export only to local Phoenix by default."""
+    """Temporarily instrument smolagents and export execution traces.
+
+    Args:
+        enabled: Whether to activate instrumentation; false is a no-op context.
+        exporter: Optional OpenTelemetry exporter, typically for in-memory tests.
+            If absent, use local Phoenix at 127.0.0.1:6006 without redirects
+            or environment proxies.
+
+    Yields:
+        None while instrumentation is active. Always uninstalls it, flushes
+        pending spans and shuts down the provider when leaving the block.
+
+    Raises:
+        RuntimeError: Local Phoenix is unavailable, tracing is already active,
+            or another tracer has already instrumented smolagents.
+
+    Notes:
+        Trace payloads can contain questions, business data and model context.
+    """
     if not enabled:
         yield
         return
@@ -32,6 +55,16 @@ def tracing(enabled=False, *, exporter=None):
             raise RuntimeError('Local Phoenix is not running; start it with make telemetry') from error
         class LocalSession(requests.Session):
             def request(self, method, url, **kwargs):
+                """Send an exporter HTTP request without following redirects.
+
+                Args:
+                    method: HTTP method forwarded to requests.Session.request.
+                    url: Destination URL selected by the exporter.
+                    **kwargs: Request options; allow_redirects is always set to False.
+
+                Returns:
+                    requests.Response from the underlying session; request errors propagate.
+                """
                 kwargs['allow_redirects'] = False
                 return super().request(method, url, **kwargs)
 
@@ -66,26 +99,17 @@ def tracing(enabled=False, *, exporter=None):
 
 
 def question_span(question):
-    """Associate a trace with the question used for routing and result matching."""
+    """Create a trace context associating execution with a question.
+
+    Args:
+        question: Mapping with optional id and business_id used as span attributes.
+
+    Returns:
+        Context manager creating the current answer_question span, or a no-op
+        context manager when tracing is disabled.
+    """
     if _provider is None:
         return nullcontext()
     return _provider.get_tracer(__name__).start_as_current_span(
         'answer_question', attributes={'question.id': question.get('id', ''),
                                        'business.id': question.get('business_id', '')})
-
-
-def record_tool_calls(calls):
-    """Attach worker-observed helper calls to the active smolagents step."""
-    if _provider is None:
-        return
-    from opentelemetry.trace import Status, StatusCode
-
-    tracer = _provider.get_tracer(__name__)
-    for call in calls:
-        span = tracer.start_span(call['name'], start_time=call['started_ns'], attributes={
-            'openinference.span.kind': 'TOOL', 'tool.name': call['name'],
-            'input.value': call['arguments'], 'output.value': call.get('result', ''),
-        })
-        if call.get('error'):
-            span.set_status(Status(StatusCode.ERROR, call['error']))
-        span.end(end_time=call['ended_ns'])

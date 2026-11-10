@@ -6,11 +6,31 @@ from .contracts import validate_answer
 
 
 def normalize(value):
+    """Normalize a string for the internal answer matcher.
+
+    Args:
+        value: Text to normalize using NFC and lowercase; punctuation becomes
+            spaces, repeated whitespace is collapsed, and diacritics remain.
+
+    Returns:
+        Normalized string with no surrounding whitespace.
+    """
     text = unicodedata.normalize('NFC', value).lower()
     return ' '.join(''.join(c if c.isalnum() or c.isspace() else ' ' for c in text).split())
 
 
 def cell_match(actual, expected, aliases=()):
+    """Compare one predicted cell with a reference value and optional aliases.
+
+    Args:
+        actual: Predicted scalar value.
+        expected: Reference scalar value.
+        aliases: Alternative reference strings; used only for string cells.
+
+    Returns:
+        Boolean match result. Strings use normalize; numeric values allow an
+        absolute difference of 1e-8. Other values require equal types and values.
+    """
     if isinstance(expected, str):
         return isinstance(actual, str) and normalize(actual) in {normalize(x) for x in (expected, *aliases) if isinstance(x, str)}
     if type(actual) in (int, float) and type(expected) in (int, float):
@@ -19,6 +39,23 @@ def cell_match(actual, expected, aliases=()):
 
 
 def match(actual, expected):
+    """Compare typed answers using the internal approximation of matching rules.
+
+    Args:
+        actual: Prediction dictionary; callers should validate its shape first.
+        expected: Reference dictionary, optionally including accepted aliases.
+
+    Returns:
+        Boolean match result. Types must match; percentages round half up to
+        two decimals, lists preserve order, and tables deduplicate rows and
+        match them without row order. Table columns are aligned by normalized
+        names when possible, otherwise by position. Table aliases apply to
+        the first cell. Matching unanswerable types need no value comparison.
+
+    Notes:
+        This is not the official evaluator. Malformed nested table structures
+        may raise errors rather than simply returning False.
+    """
     kind = expected.get('type')
     if actual.get('type') != kind:
         return False
@@ -59,6 +96,16 @@ def match(actual, expected):
             cell_match(x, y, names if k == 0 else []) for k, (x, y) in enumerate(zip(p, row)))] for p in predicted]
         assigned = {}
         def assign(i, seen):
+            """Find a reference-row assignment for one predicted row.
+
+            Args:
+                i: Index of a predicted row in the captured compatibility graph.
+                seen: Set of reference indices visited in this search; mutated in place.
+
+            Returns:
+                True if an augmenting path exists. Updates the captured reference-to-
+                prediction assignment, recursively moving prior assignments as needed.
+            """
             for j in edges[i]:
                 if j not in seen:
                     seen.add(j)
@@ -75,6 +122,25 @@ def match(actual, expected):
 
 
 def score(questions, predictions, references):
+    """Score a selected question set against references with the internal matcher.
+
+    Args:
+        questions: Nonempty sequence of selected question dictionaries with ids.
+        predictions: Sequence of prediction dictionaries with unique ids;
+            omitted selected ids count as abstentions.
+        references: Reference dictionaries keyed by id, with optional aliases.
+
+    Returns:
+        Report dictionary with per-question outcomes, counts, penalized_accuracy
+        ((correct - wrong) / total), coverage and answered_accuracy. The report
+        labels the evaluator internal-not-official; invalid answers count wrong.
+
+    Raises:
+        ValueError: Selected questions are empty, question/prediction ids are
+            duplicated, predictions include unselected ids, or a reference is
+            missing for a selected question.
+        KeyError: An input record has no id.
+    """
     guesses = {p['id']: p for p in predictions}
     truth = {r['id']: r for r in references}
     selected = {q['id'] for q in questions}
@@ -98,4 +164,6 @@ def score(questions, predictions, references):
     correct = sum(item['outcome'] == 'correct' for item in outcomes)
     wrong = sum(item['outcome'] == 'wrong' for item in outcomes)
     return {'evaluator': 'internal-not-official', 'total': total, 'correct': correct, 'wrong': wrong, 'abstain': total - correct - wrong,
-            'penalized_accuracy': (correct - wrong) / total if total else 0, 'questions': outcomes}
+            'penalized_accuracy': (correct - wrong) / total if total else 0,
+            'coverage': (correct + wrong) / total if total else 0,
+            'answered_accuracy': correct / (correct + wrong) if correct + wrong else None, 'questions': outcomes}

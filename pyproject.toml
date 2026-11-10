@@ -1,7 +1,7 @@
 [project]
 name = "tabular-analysis-agent"
 version = "0.1.0"
-description = "Vietnamese tabular analysis with native code actions and isolated execution"
+description = "Vietnamese tabular question answering with SQL over prepared DuckDB bundles"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "smolagents[openai,telemetry]==1.26.0",
@@ -14,6 +14,8 @@ dependencies = [
     "graphql-core>=3.2,<3.3",
     "arize-phoenix==14.6.0",
     "python-dotenv>=1.0,<2",
+    "duckdb==2.0.0",
+    "pandera[pandas]==0.34.1",
 ]
 
 [tool.uv]

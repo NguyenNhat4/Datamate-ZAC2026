@@ -21,11 +21,26 @@ _original_enter = GrpcServer.__aenter__
 
 
 async def _http_only(self):
+    """Enter Phoenix's server context with its gRPC listener disabled.
+
+    Args:
+        self: GrpcServer instance whose _disabled flag is set before entry.
+
+    Returns:
+        The awaited result of the original GrpcServer.__aenter__ method.
+    """
     self._disabled = True
     return await _original_enter(self)
 
 
 def main():
+    """Start Phoenix using process arguments and this module's local configuration.
+
+    Returns:
+        None if Phoenix exits normally. Patches GrpcServer.__aenter__ for this
+        process and runs Phoenix's main module; HTTP uses 127.0.0.1:6006 and
+        the gRPC listener is disabled. Server errors or SystemExit propagate.
+    """
     GrpcServer.__aenter__ = _http_only
     print('Phoenix local mode: HTTP on 127.0.0.1:6006; gRPC disabled.', flush=True)
     runpy.run_module('phoenix.server.main', run_name='__main__')

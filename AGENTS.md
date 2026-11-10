@@ -39,7 +39,7 @@ When working against an evaluation profile, its current official requirements ta
 
 ## Evaluation and reporting
 
-- The local runner is documented in `README.md`: `make bench`, `make predict`, `make test`, and `make test-sandbox`. Benchmarks require a provisioned local model server; scripted tests do not establish model quality.
+- The local runner is documented in `README.md`: `make prepare`, `make bench`, `make predict`, `make test`, and `make check`; the submission entrypoint is `predict.sh`. Measuring a commit follows `docs/fix/RUNBOOK.md`. Benchmarks require a provisioned local model server; scripted tests do not establish model quality.
 - Use the applicable profile's metrics and matching rules. Implement PA according to the reference profile when relevant. Distinguish internal evaluators from official evaluators.
 - Run checks appropriate to logic changes and state whether they use synthetic data, training/validation data, or benchmark data. Mock-model checks do not establish real-model quality.
 - Distinguish measurements on team hardware from profile reference limits. Do not claim compliance on unverified hardware.
@@ -49,3 +49,6 @@ When working against an evaluation profile, its current official requirements ta
 
 - Do not create commits, push to a remote, or submit an entry unless explicitly requested in the current task.
 - Reset commits only when explicitly requested. Preserve working files by default; do not use a hard reset, delete work, or force-push without explicit authorization for those actions.
+
+## Records
+- Whatever task you done if having record on decisions and progresses would help future session start smoothly, create that like docs/fix. 

@@ -1,111 +1,106 @@
-# Tabular analysis agent
+# Tabular analysis assistant
 
-A `smolagents.CodeAgent` answers Vietnamese questions about CSV, Excel and SQLite files. It can use a local model server or the OpenAI API. The tool definitions and descriptions are together in [tabular_agent/tools.py](tabular_agent/tools.py); [tabular_agent/agent.py](tabular_agent/agent.py) passes them directly to `CodeAgent`.
+Answers Vietnamese questions about a business's tabular files (CSV, Excel, SQLite) with a typed answer, in two stages:
 
-For the data contract, answer types and reference evaluation profile, see [project-overview.md](project-overview.md). The current split's `rulebook.md`, each business's `README.md`, and `as_of_date` are provided to the agent. Reference answers are read only after a benchmark's inference has finished.
+1. **Preparation** (`make prepare`, [tabular_agent/preparation/](tabular_agent/preparation/)) reads every file of each business, without reading questions or answers. For each business it publishes a DuckDB **bundle**: clean tables, rulebook-ready `semantic` relations (orders and sales lines with the rulebook's order rules applied), and a documented schema. See [data preparation](docs/data-preparation.md).
+2. **Answering** ([tabular_agent/sql_agent.py](tabular_agent/sql_agent.py)) gives a local model the split's rulebook, the business README, the bundle's schema, explicit dates derived from `as_of_date`, and the question. The model sends one read-only `SELECT` at a time, sees the result, and ends with a typed JSON answer. Code checks every query and every answer; see [one question](docs/diagrams/02-question-flow.md).
 
-## Run questions in the UI
+The data contract, answer types and the reference evaluation profile are in [project-overview.md](project-overview.md). The current goal, scores, backlog and lessons are in [the fix index](docs/fix/README.md). How to measure a commit is in [the runbook](docs/fix/RUNBOOK.md).
 
-1. Install the dependencies once:
+## Setup
+
+Requirements: Linux, Python 3.12, `uv`, and the local model weights and `llama-server` binary already provisioned under `models/` (the paths are in [scripts/local-model.sh](scripts/local-model.sh)). Nothing is downloaded during inference.
+
+```bash
+make setup      # installs the locked dependencies into .venv-native
+make help       # lists the targets
+```
+
+The benchmark runs use the alias `local-coder-7b` (weights and server settings in runbook section 1). The model choice is still open ([workflow review](docs/fix/2026-11-10_workflow_gaps/README.md), 3.8).
+
+## Try questions in the UI
+
+1. In one terminal, start the model server and leave it running. It loads the model with the benchmark settings on port 18234:
 
    ```bash
-   make setup
+   make serve
    ```
 
-2. To inspect traces in Phoenix, start it in a terminal and leave it running. This step is optional:
-
-   ```bash
-   make telemetry
-   ```
-
-3. In a terminal (a second one if Phoenix is running), start the test UI:
+2. In a second terminal, start the UI and open <http://127.0.0.1:8501>:
 
    ```bash
    make ui
    ```
 
-4. Open [the test UI](http://127.0.0.1:8501). Choose a dataset directory, such as `data/train`, and select a **Model provider**:
+3. Choose a dataset directory such as `data/train`, a business and some questions, then **Run selected questions**. The UI answers with SQL over the business's bundle, taken from the first of `artifacts/prepared-r2-dev`, `-unseen` and `-public` that holds it (override with `PREPARED="dir ..."`), at temperature 0 with at most six steps. Prepare the bundles first with `make prepare`.
+4. Each result shows the answer, time and model calls. Expand a question under **Actions and observations** to see each model reply, query and result, and the final answer. On a split with `answers.jsonl` the run is a benchmark and also shows the internal score.
 
-   - **OpenAI API**: add `OPENAI_API_KEY` to your local `.env` file or environment, then choose an OpenAI model. The API is billed and receives the selected question and relevant business context.
-   - **Local server**: run `make serve-local` in a separate terminal and leave it running. This uses the locally provisioned model and defaults to `local-coder-7b` at `http://127.0.0.1:8000/v1`. Loading can take a while. Use **Check local connection** when it is ready. You may instead use another OpenAI-compatible local server.
+Press `Ctrl+C` in each terminal to stop. Stop the model server when you are done so the GPU idles. Runs are saved under `runs/`; they hold business data and stay out of Git.
 
-5. Choose a **Business**, then select from its questions. To trace the run, check **Send traces to local Phoenix**. Click **Run selected questions**.
-6. Expand the question under **Actions and observations** to inspect its code, results, and agent memory. If tracing is enabled, open [Phoenix](http://127.0.0.1:6006), select the `tabular-agent` project, and open the latest trace.
-
-Press `Ctrl+C` in each terminal to stop the UI, local model server, and Phoenix. Runs, memory logs, and traces may contain business data and are stored locally in Git-ignored directories.
-
-## Run locally
-
-Requirements: Linux, working bubblewrap user namespaces, Python 3.12, `uv`, and an already provisioned local OpenAI-compatible model server. The agent does not download weights during inference.
+## Command line
 
 ```bash
-make setup
-make predict SPLIT=data/public_test ARGS="--model your-model --base-url http://127.0.0.1:8000/v1"
-make bench SPLIT=data/train LIMIT=5 ARGS="--model your-model --base-url http://127.0.0.1:8000/v1"
+make prepare SPLIT=data/train OUT=artifacts/prepared-example ARGS="--business biz_104"
+make bench BUNDLES=artifacts/prepared-example LIMIT=20        # against the server started by make serve
+make bench-local BUNDLES=artifacts/prepared-example LIMIT=20  # starts a fresh server and stops it afterwards
+make predict SPLIT=data/public_test BUNDLES=artifacts/prepared-r2-public
 ```
 
-## Switch to the OpenAI API
+- `BUNDLES` is one folder written by `make prepare`. A question whose business has no bundle there is answered `abstain` without an error, so check that the folder holds every business of the split.
+- The defaults are the benchmark settings: temperature 0, at most six steps, 60 seconds per question, all selected questions (`LIMIT=0`), the server on `LOCAL_PORT` (18234) with the model `LOCAL_MODEL_ALIAS` (`local-coder-7b`). Pass other CLI options with `ARGS="..."`, for example `ARGS="--question-id q_... --question-id q_..."`.
+- Each run writes `questions.jsonl`, `submission.jsonl` (flushed after every question), `manifest.json` (commit, settings, dependency versions), `timings.json`, `timing-summary.json`, and one log per question under `logs/`. A log holds the stages `schema`, `memory_step` (model reply), `sql`, `observation` (result or rejection) and `question_timing` (id, final answer, seconds). A benchmark also writes `score.json`.
+- Reference answers are read only by `bench`, after all questions are answered. The scorer (`tabular_agent/evaluate.py`) is an **internal approximation**, not the official evaluator.
+- `make bench` against a long-running server is quicker to start, but the server's prompt cache makes replies depend on earlier requests. For comparable numbers, use the runbook: one fresh server per set, from a worktree pinned at the measured commit.
 
-Add `OPENAI_API_KEY` to the Git-ignored `.env` file, or set it in your environment. Do not put the key in commands, logs, or chat. The environment variable takes precedence. The optional `OPENAI_MODEL` setting selects the default API model; otherwise the default is `gpt-5.4-mini`.
+## Submission entrypoint
 
-In `make ui`, select **OpenAI API** under **Model provider** and enter the model name. Select **Local server** to switch back. From the CLI:
+`predict.sh` runs the system the benchmarks measure, end to end:
+
+1. It starts the local model server with the benchmark settings (`scripts/serve-local.sh`, port `LOCAL_PORT`, default 18234).
+2. While the model loads, it prepares every business in `DATA_DIR` (default `/data`, only read) into DuckDB bundles under `WORK_DIR` (default a new folder under `/tmp`).
+3. It answers every question with SQL over those bundles, at temperature 0 with at most six steps.
+
+Answers go to `RESULT_DIR/submission.jsonl` (default `/result`); `RESULT_DIR` must be empty or absent. Logs go to `RESULT_DIR/logs/`: one file per question, whose last event holds the id, final answer and elapsed seconds, plus `pipeline.log` (phase times) and `prepare.log`.
+
+The whole run is kept within `RUN_SECONDS` (default 21,600, the reference profile's six hours, including preparation and model loading). Answering stops `STOP_MARGIN_SECONDS` (default 300) before that, keeping every answer already written. A business that preparation blocks gets `abstain` for its questions. Set `BASE_URL` (and `MODEL`) to use an already running server instead of starting one. The server binary, device (`LOCAL_DEVICE`, default `Vulkan1`) and weights are those of this machine; a container for other hardware must provide its own.
 
 ```bash
-make bench SPLIT=data/train LIMIT=5 ARGS="--provider openai --model gpt-5.4-mini"
+DATA_DIR=data/public_test RESULT_DIR=runs/public-dry WORK_DIR=$PWD/artifacts/prepared-dry ./predict.sh
 ```
 
-The existing `--backend openai` option means a local OpenAI-compatible server; use `--provider openai` for the hosted API. OpenAI requests send the question, current rulebook, business README, generated code, and any observations printed from the data to OpenAI. API calls may incur charges. This provider requires network access and is not suitable for evaluation profiles that require offline inference. The API endpoint is fixed to `https://api.openai.com/v1`.
+The dry-run procedure and how to read its result without looking at answers are in runbook section 11.
 
-`make demo` creates an invented dataset and starts the existing provisioned local launcher. For the UI, follow the steps above; a separate local model server is needed only when **Local server** is selected.
+## OpenAI API (development only)
 
-Each run saves `questions.jsonl`, incrementally flushed `submission.jsonl`, and one action log per question under `logs/`. Benchmarks also save `score.json`. The scorer is an **internal approximation**, not the official evaluator. Existing run directories are never overwritten.
+`--provider openai` answers with a hosted model instead of the local server, for example `make bench BUNDLES=... LIMIT=5 ARGS="--provider openai --model gpt-5.4-mini"`, or **OpenAI API** in the UI. Put `OPENAI_API_KEY` in the Git-ignored `.env` file or the environment, never in commands or logs. `OPENAI_MODEL` sets the default model (otherwise `gpt-6-luna`). The API receives the question, rulebook, business README, bundle schema, the generated queries and their results; calls are billed and need network access, so this provider does not fit an offline evaluation profile.
 
-## Inspect agent memory
+Importing `smolagents` loads `.env` into the environment. Local runs therefore read only the `LOCAL_*` settings, never generic names such as `MODEL` or `BASE_URL` that `.env` may hold for other tools.
 
-Smolagents keeps the task, actions, observations, and errors in its in-memory `AgentMemory` during each question. A step callback records the model-input messages and completed step in that question's local JSONL log. In `make ui`, expand a question under **Actions and observations** to inspect the messages, model output, errors, and token usage when the model reports it. This is the framework's memory representation before the model adapter formats the request.
+## Traces (optional)
 
-Each question creates a fresh agent and worker; memory from a previous question is not reused. The recorded logs may contain full questions, rulebooks, business notes, and observations, so keep them local. The agent does not automatically summarize or prune its memory; the `--context` setting is not currently enforced as a token limit.
+`make telemetry` starts a local Phoenix collector on <http://127.0.0.1:6006>. Add `ARGS="--telemetry"` to a run, or check **Send traces to local Phoenix** in the UI, to export one span per question and its model calls to the `tabular-agent` project. Tracing is off by default, exports only to `127.0.0.1:6006`, and stores traces under the Git-ignored `.cache/phoenix`. Traces hold questions, prompts and results, so they contain business data.
 
-This uses the step callbacks described in the [smolagents memory guide](https://huggingface.co/docs/smolagents/v1.26.0/en/tutorials/memory). The saved step view is for inspection; it is not a resumable agent session.
+## Code layout
 
-## Inspect runs with OpenTelemetry
+| Path | Role |
+|---|---|
+| `tabular_agent/preparation/` | Source readers, value parsers, column semantics, rulebook-ready views and the preparation pipeline; optional local-model help for ambiguous layouts |
+| `tabular_agent/sql_agent.py` | Prompt, query checks (one allowlisted `SELECT`, no system date, unready sales tables refused) and answer checks |
+| `tabular_agent/cli.py` | `prepare`, `profile`, `bench`, `predict`, `score` and `doctor` |
+| `tabular_agent/model.py` | Local and OpenAI clients |
+| `tabular_agent/contracts.py`, `evaluate.py` | Answer types and the internal scorer |
+| `tabular_agent/telemetry.py`, `phoenix_local.py` | Optional tracing |
+| `streamlit_app.py` | The UI |
+| `predict.sh`, `scripts/` | Submission entrypoint; model server settings (`local-model.sh`), server and benchmark launchers, dry-run report |
+| `tests/answering/`, `tests/preparation/` | Synthetic checks |
 
-The optional local setup follows the [smolagents run-inspection guide](https://huggingface.co/docs/smolagents/v1.26.0/en/tutorials/inspect_runs): OpenInference instruments the agent and sends OpenTelemetry spans to Phoenix.
-
-Start Phoenix in one terminal:
-
-```bash
-make telemetry
-```
-
-Open [Phoenix](http://127.0.0.1:6006) and select the `tabular-agent` project. In another terminal, enable tracing for a run:
-
-```bash
-make bench LIMIT=5 ARGS="--model your-model --base-url http://127.0.0.1:8000/v1 --telemetry"
-```
-
-For `make ui`, select **Send traces to local Phoenix** before starting a run. Phoenix must be running first. Agent runs, steps, local model calls, and worker-observed tool calls appear in the trace; DataFrames stay in the worker and are represented by their shape. A nested helper called internally by another tool is not a separate tool span.
-
-Tracing is off by default and exports only to `127.0.0.1:6006`. It can record questions, rulebooks, model messages, code, observations, and tool arguments or results, which may contain business data. Phoenix stores traces locally under the Git-ignored `.cache/phoenix` directory. The local launcher disables Phoenix's gRPC listener; the HTTP endpoint remains available on localhost. The collector is optional and does not need to run for normal inference.
-
-## Structure
-
-- `tools.py`: `@tool` functions, descriptions, and the available tool list.
-- `agent.py`: native `CodeAgent` construction and per-question task context.
-- `memory.py`: records framework memory at each completed action for local inspection.
-- `executor.py` and `worker.py`: a persistent bubblewrap worker with read-only input, no network, time and resource limits, and reset after errors.
-- `telemetry.py`: optional OpenInference and local OpenTelemetry export; `phoenix_local.py` starts the local HTTP-only collector.
-- `model.py`: local and OpenAI API `OpenAIModel` configurations.
-- `contracts.py`, `evaluate.py`, and `cli.py`: typed outputs, internal scoring, and the runner.
-
-The rewrite uses a task-specific system prompt and the framework's tool descriptions. It no longer includes the previous calculation-evidence validator, audit helpers, detailed dashboard, or trace format. Typed output validation and basic isolation tests do not prove answer accuracy, and real-model quality and final deployment compatibility remain to be evaluated.
+Answer types are `number`, `percent`, `string`, `date`, `boolean`, `list`, `table`, `unanswerable` and `abstain`. `unanswerable` means the data cannot support an answer; `abstain` means the system chooses not to answer.
 
 ## Checks
 
 ```bash
-make check
-make test
-make test-sandbox
+make check   # compiles every module and checks whitespace
+make test    # tests/answering and tests/preparation
 ```
 
-The new tests use invented data and a scripted model. The sandbox suite needs working bubblewrap namespaces. Older tests in the top-level `tests/` directory describe the retired implementation; the Makefile runs the rewrite suite in `tests/rewrite/`.
+The tests use invented data and no model, so they check mechanisms, not answer quality. One preparation test is an expected failure on purpose (backlog B17 in the fix index).
