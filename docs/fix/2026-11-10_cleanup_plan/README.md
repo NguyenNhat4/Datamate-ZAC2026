@@ -1,8 +1,8 @@
-# Plan: remove the retired code path and refresh outdated documents
+# Cleanup: remove the retired code path and refresh outdated documents
 
 Date: 10 November 2026
-Status: proposed; nothing in this plan has been carried out yet.
-Branch: `fix/sql-answering-accuracy` at `155f323`.
+Status: done. Steps 1–5 are commits `37ee7e9`, `a40c07d`, `a19da8b`, `b2657c4` and the commit that adds section 6. Results and deviations from the plan are in section 6.
+Branch: `fix/sql-answering-accuracy`, starting at `155f323`.
 Scope: documents, tests, Makefile and scripts, and removing the raw-file CodeAgent path. The prompts and answer logic of `sql_agent.py` and of `preparation/` do not change.
 
 This plan carries out and extends item 3.10 of [the workflow review](../2026-11-10_workflow_gaps/README.md). Start from [the index](../README.md).
@@ -130,6 +130,37 @@ Each step is one commit. Steps 1–3 do not touch answering code and can be done
 
 ## 5. Not verified
 
-- The cause of the `test_safety.py:53` failure.
-- That the SQL branch's model replies stay identical after step 4; this is the check in step 4, not yet run.
-- Whether anyone still uses `make demo` or the raw-file UI option.
+Sections 1 to 4 are the plan as written before the work. What was checked, and what still is not, is in section 6.
+
+## 6. Results
+
+### 6.1 What each commit did
+
+| Step | Commit | Done |
+|---|---|---|
+| 1 | `37ee7e9` | This plan; the index no longer says the entrypoint runs another system; the 8 November plan marked superseded; notes in the workflow review 3.1 and 3.10; the preparation doc no longer calls the SQL executor future work |
+| 2 | `a40c07d` | Six dead test files and their scripted model deleted; the UI results test rewritten for the current run view and moved into `make test`; `test_safety` split (2.3, below) |
+| 3 | `a19da8b` | CLI defaults: six steps, all selected questions, the server on `LOCAL_PORT` (18234) with `LOCAL_MODEL_ALIAS`. `make bench`, `bench-local` and `predict` take `BUNDLES=` (one folder) and answer with SQL. `scripts/local-model.sh` holds the server settings for `serve-local.sh`, `bench-local.sh` and `predict.sh`; `serve-local.sh` defaults to port 18234. `--backend` removed (6.2). Runbook traps 1, 2 and 4 and the preparation doc updated |
+| 4 | `b2657c4` | `agent.py`, `executor.py`, `worker.py`, `tools.py`, `memory.py`, `demo.py` and their tests deleted (2,701 lines removed in the commit). `--prepared` required for `bench` and `predict`; `--exec-timeout`, `make demo` and `make test-sandbox` removed; the always-zero worker timing fields and `retries` dropped from `timings.json`; the manifest also records the DuckDB version. The UI always answers with SQL and shows the final answer of each question. `tests/rewrite/` renamed `tests/answering/` |
+| 5 | this commit | README, diagrams (five pages became three: overview, one question, runs and scoring), `AGENTS.md` runner line, preparation doc test line, this section, the index and the runbook's tag table |
+
+### 6.2 Deviations from the plan, with reasons
+
+- **`--backend` removed, and local runs no longer read `MODEL` or `BASE_URL`** (step 3, not planned). Importing `smolagents` calls `load_dotenv()`, which copies the local `.env` into the environment. On the team laptop `.env` holds `BACKEND=ollama` and `MODEL=gpt-4o-mini`, so a run without `--base-url` went to port 11434, where nothing listens, and a run without `--model` would have recorded an OpenAI model name in its manifest. The measured runs always passed both flags, so no recorded result is affected. Local defaults now come only from the `LOCAL_*` variables that the scripts also use. A test covers it. `predict.sh` still honours `BASE_URL` and `MODEL` from the shell, as documented.
+- **`test_safety` (2.3).** The test never passed: `parse_value` keeps text exactly as written, so a blank text cell is published as `''`, not NULL. In the r2 bundles 50 `clean` text columns hold such cells and no `semantic` relation does. Changing it changes the bundles, so it was not fixed here: the partition-scaling half of the test now passes on its own, and the blank-text half is an expected failure that points to backlog B17.
+- **`normalize_final_json` kept** (step 4). `LocalModel.generate`, which the SQL path uses, still rewrites a reply ending in `Final answer: ```json …``` ` into a CodeAgent `final_answer(...)` action. The SQL path cannot read that and asks the model to reply again, which costs a step. It fired once in the recorded SQL runs (`unseen48-205dee8`, at temperature 0.8). Removing it changes answering, so it is backlog B18.
+- **`make bench` defaults to `LIMIT=0` and needs `BUNDLES`.** A bare `make bench` now stops with a message instead of sampling 20 questions over the raw files.
+
+### 6.3 Checks
+
+- **Replay of recorded replies (no model server).** A replay model returned the recorded model replies of `runs/<set>-r2s2b` through `cli.run` and recorded every prompt it received. The unchanged code (`155f323`) reproduced each recorded submission exactly, and two replays of it were identical. After steps 3 and 4, all five open frozen sets (sample10, setA, setB, types16, unseen48: 154 questions, 345 model calls) gave **byte-identical prompts, logs, submissions and scores**. The comparison ignored timing fields, and the fields step 4 removed, which were zero in every baseline row. holdout48 was not replayed: it is closed. The replay scripts are not kept in the repository.
+- **Live run.** sample10 at `b2657c4`, run as in runbook sections 3 and 4 through the new `bench-local.sh` (tag `c1`, `runs/sample10-c1`): 21 of 21 model replies identical to `runs/sample10-r2s2b`, the same submission, 10 / 0 / 0, PA +1.00, median 6.2 s. The manifest shows `dirty: false`, `agent_mode: sql`, temperature 0, 6 steps, port 18234 and the recorded weight digest.
+- **Server arguments.** With a stand-in `llama-server` that records its arguments, `serve-local.sh`, `bench-local.sh` and `predict.sh` passed identical arguments before (`155f323`) and after step 3.
+- **Entrypoint.** Old and new `predict.sh`, against a stand-in server on a one-business synthetic split, both exited 0 with the same submission and question log. Their manifests differ only in the paths, the revision and the added DuckDB version.
+- **Tests.** `make test`: `tests/answering` 36 run, OK; `tests/preparation` 176 run, OK with one expected failure (B17). `make check` passes. `uv sync --locked` passes after the `pyproject.toml` description change.
+
+### 6.4 Not verified
+
+- The full public dry run (backlog B6) has still not been run; the entrypoint check above used a stand-in server and one invented business.
+- Whether anyone used `make demo` or the raw-file UI option. Both are gone; the code is in Git history before `b2657c4`.
+- Real-model equality was checked live on sample10 only. The other four sets were checked by replay, which shows the prompts are identical; with temperature 0 and a fresh server, identical prompts gave identical replies on every earlier repeat (runbook section 9, `e1`).

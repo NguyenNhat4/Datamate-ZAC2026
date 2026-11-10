@@ -217,7 +217,7 @@ The checks against references for the 10 November patterns (71, 20, 33 questions
 
 ### 3.10 Stale documents and tests
 
-**Being done.** The [cleanup record](../2026-11-10_cleanup_plan/README.md) carries this out and also removes the raw-file agent.
+**Done since this review.** The [cleanup record](../2026-11-10_cleanup_plan/README.md) carried this out and also removed the raw-file agent (`37ee7e9` to `b2657c4`). The evidence below describes the code before it.
 
 **Evidence.**
 

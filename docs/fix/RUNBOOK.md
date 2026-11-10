@@ -210,6 +210,7 @@ Each run folder is named `<set>-<tag>`. Only the manifest links a tag to its cod
 | `r2s2` | `a77671d` | `prepared-r2-dev` / `prepared-r2-unseen` | rankings record 4 |
 | `r2s2b` | `5e1507b` | `prepared-r2-dev` / `prepared-r2-unseen` | rankings record 4 |
 | `e1` | `506d567` | `prepared-r2-dev` (sample10 only). The public dry run `public-dry-e1` was stopped after 49 questions; its run-time bundles are in `artifacts/prepared-dry-e1/prepared` | [entrypoint record](2026-11-10_submission_entrypoint/README.md) |
+| `c1` | `b2657c4` | `prepared-r2-dev` (sample10 only); a check that the cleanup changed no answers | [cleanup record](2026-11-10_cleanup_plan/README.md) 6.3 |
 
 Older runs (`fix2` to `fix7`, `step1*`, `v2`, `baseline`, `check-*`) ran at the server's default temperature (0.8) on trees with uncommitted changes. Their manifests name the base commit only.
 

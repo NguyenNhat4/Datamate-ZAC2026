@@ -74,7 +74,7 @@ The frozen ids are in [question_sets.json](2026-11-10_unseen_businesses/question
 | 10 Nov | [Rankings, ties and query patterns](2026-11-10_rankings_and_patterns/README.md), with [PROGRESS](2026-11-10_rankings_and_patterns/PROGRESS.md) | One DuckDB thread; customers by money; days over an amount; unsold products; byte-identical prompts for other kinds | `c509cba`, `a77671d`, `5e1507b` | Done |
 | 10 Nov | [Workflow review](2026-11-10_workflow_gaps/README.md) | What the workflow lacks for the 100-question goal; proposed samples and additions | none | Review; additions proposed |
 | 10 Nov | [Submission entrypoint](2026-11-10_submission_entrypoint/README.md) | `predict.sh` prepares the data at run time and answers with SQL and the benchmark settings, within the 6-hour budget; each question's log holds its final answer | `506d567` | Code done and checked; the full public dry run is still to do (runbook section 11) |
-| 10 Nov | [Cleanup of the retired path and outdated documents](2026-11-10_cleanup_plan/README.md) | Removing the raw-file CodeAgent path, dead tests and outdated documents; Makefile and scripts use the measured settings | see the record | In progress |
+| 10 Nov | [Cleanup of the retired path and outdated documents](2026-11-10_cleanup_plan/README.md) | The raw-file CodeAgent path, dead tests and outdated documents removed; `make bench`/`predict` and the CLI defaults use the measured settings; server settings in one file; answers unchanged (replay of five sets, live sample10) | `37ee7e9`, `a40c07d`, `a19da8b`, `b2657c4` | Done |
 
 ## Terms
 
@@ -119,6 +119,7 @@ Gathered on 10 November from the four records with plans. "Affects" gives the qu
 | B15 | biz_124's drug-list sheet is reported as an ambiguous layout; the cause was not reproduced | biz_124 | Unseen 2 |
 | B16 | Thousands separators that could be read either way | several | Unseen 3.1 |
 | B17 | A blank text cell is published as `''`, not NULL, so `COUNT` and `GROUP BY` on that column count it. In the r2 bundles: 50 `clean` text columns, none in `semantic`. Fixing it needs a new bundle generation and a measurement; `test_safety.py` keeps it as an expected failure | queries over `clean` text columns | Cleanup 2.3 |
+| B18 | `LocalModel.generate` (`model.py`) still rewrites a reply ending in `Final answer: ```json …``` ` into a CodeAgent `final_answer(...)` action, which the SQL path cannot read, so the model is asked again and loses a step. Seen once in the recorded SQL runs (`unseen48-205dee8`, temperature 0.8). Removing it changes answering: measure it | rare | Cleanup 6.2 |
 
 ### Measurement and workflow
 
