@@ -2,11 +2,11 @@
 
 This folder holds one decision record per round of fixes. Each record covers its plan, its decisions with their reasons, and its measurements. Read this page first: it holds the current goal, where the scores stand, the open backlog, and the lessons so far. Then read the records you need. The exact commands for measuring a commit are in [RUNBOOK.md](RUNBOOK.md).
 
-Last updated: 11 November 2026, branch `feat/intent-programs` (code `<<CODE>>`).
+Last updated: 11 November 2026, branch `feat/intent-programs` (code `98e5e46`).
 
 ## Goal now
 
-**11 November: the public test with no wrong answer.** That was the target stated for the 11 November round. It cannot be guaranteed while the public answers are hidden, and it is not reached: see [the intent record](2026-11-11_intent_layer/README.md), section 5. Recurring question kinds now go through fixed queries before the model; they explain 80.6% of the open training questions with no wrong answer, but only <<PUBLIC_PCT>>% of the public questions, and 5 of the 7 public businesses without sales lines still have none. The numbers below are the earlier PA target, which still decides when to spend public uploads.
+**11 November: the public test with no wrong answer.** That was the target stated for the 11 November round. It cannot be guaranteed while the public answers are hidden, and it is not reached: see [the intent record](2026-11-11_intent_layer/README.md), section 5. Recurring question kinds now go through fixed queries before the model; they explain 82.4% of the open training questions with no wrong answer, but only 17.9% of the public questions, and 4 of the 7 public businesses that had no sales lines still have none (dev_011, 012, 013, 014; dev_009 has invoice headers only). The numbers below are the earlier PA target, which still decides when to spend public uploads.
 
 **Target:** PA ≥ +0.80 on gate100, a closed sample of 100 training questions, before running the whole public test. The target was set on 10 November.
 
@@ -48,13 +48,24 @@ Code `5e1507b`, bundles `artifacts/prepared-r2-*`, local 7B model on the team la
 | unseen48 | open | 37 / 5 / 6 | +0.667 | `runs/unseen48-r2s2b` |
 | holdout48 | closed, totals only | 37 / 6 / 5 | +0.646 | `runs/holdout48-r2s2b` |
 
+Code `9b8ad23`, bundles `artifacts/prepared-r4-train` (11 November), same model and scorer. "Kinds" means the fixed question kinds of the [intent record](2026-11-11_intent_layer/README.md); "model" means the SQL answering path. Each cell gives correct / wrong / abstain.
+
+| Set | Mode | Result | PA | Run folder |
+|---|---|---|---|---|
+| work100 (open) | model alone, code `83dca1a` | 72 / 18 / 10 | +0.540 | `runs/work100-r4m` |
+| work100 (open) | kinds, then model | 91 / 5 / 4 | +0.860 | `runs/work100-r4i3` |
+| gate100 (closed, totals only) | kinds, then model (the default) | 85 / 10 / 5 | +0.750 | `runs/gate100-r4i3` |
+| gate100 (closed, totals only) | kinds only (`--intents-only`) | 82 / 0 / 18 | +0.820 | `runs/gate100-r4k` |
+
+The earlier baseline of work100 is 71 / 20 / 9, PA +0.510 (code `37ee7e9`, bundles `r2`). The gate target of PA ≥ +0.80 is met by the kinds-only mode and not by the default mode: on the 18 gate questions that no kind claims, the model gets 3 right, 10 wrong and abstains on 5. The gate does not see the public split, where the kinds claim 17.9% (next table). gate100 has been read twice, both on 11 November at `9b8ad23`.
+
 ## Since 11 November: no-model checks
 
 | Check | Result | Command |
 |---|---|---|
-| Fixed kinds against the 2,852 open training references | <<CLAIMED>> claimed (<<CLAIMED_PCT>>%), <<WRONG>> wrong | `scripts/oracle-replay.py --prepared artifacts/prepared-r4-train` |
-| Claims on the 1,000 public questions | <<PUBLIC_CLAIMED>> (<<PUBLIC_PCT>>%) | `scripts/claim-coverage.py --split data/public_test --prepared artifacts/prepared-r4-public` |
-| Bundle invariants, 44 bundles | <<INVARIANTS>> | `scripts/bundle-invariants.py` |
+| Fixed kinds against the 2,852 open training references | 2,351 claimed (82.4%), 0 wrong | `scripts/oracle-replay.py --prepared artifacts/prepared-r4-train` |
+| Claims on the 1,000 public questions | 179 (17.9%) | `scripts/claim-coverage.py --split data/public_test --prepared artifacts/prepared-r4-public` |
+| Bundle invariants, 44 bundles | 0 problems | `scripts/bundle-invariants.py` |
 
 ## Question sets
 
@@ -67,7 +78,8 @@ The frozen ids are in [question_sets.json](2026-11-10_unseen_businesses/question
 | types16 | 16 | development | open | Questions of the four period-function types |
 | unseen48 | 48 | the 22 other training businesses | open | Diagnosed on 10 November |
 | holdout48 | 48 | the same 22 | closed | Totals only, read 7 times. Its businesses also supplied validation questions on 10 November, so it now estimates new questions from known businesses |
-| gate100, work100 | 100 each | all 30 | proposed | Workflow review, section 4 |
+| gate100 | 100 | all 30 | closed | Drawn on 10 November; totals read twice on 11 November (both modes, [intent record](2026-11-11_intent_layer/README.md) 3.3) |
+| work100 | 100 | all 30 | open | Drawn on 10 November; baseline and 11 November runs above |
 
 - **Development businesses (8):** biz_104, 106, 107, 111, 112, 120, 121, 127.
 - **The other 22 training businesses:** biz_101, 102, 103, 105, 108, 109, 110, 113, 114, 115, 116, 117, 118, 119, 122, 123, 124, 125, 126, 128, 129, 130.
@@ -84,7 +96,7 @@ The frozen ids are in [question_sets.json](2026-11-10_unseen_businesses/question
 | 10 Nov | [Rankings, ties and query patterns](2026-11-10_rankings_and_patterns/README.md), with [PROGRESS](2026-11-10_rankings_and_patterns/PROGRESS.md) | One DuckDB thread; customers by money; days over an amount; unsold products; byte-identical prompts for other kinds | `c509cba`, `a77671d`, `5e1507b` | Done |
 | 10 Nov | [Workflow review](2026-11-10_workflow_gaps/README.md) | What the workflow lacks for the 100-question goal; proposed samples and additions | none | Review; additions proposed |
 | 10 Nov | [Submission entrypoint](2026-11-10_submission_entrypoint/README.md) | `predict.sh` prepares the data at run time and answers with SQL and the benchmark settings, within the 6-hour budget; each question's log holds its final answer | `506d567` | Code done and checked; the full public dry run is still to do (runbook section 11) |
-| 11 Nov | [Fixed question kinds before the model](2026-11-11_intent_layer/README.md) | A deterministic layer for recurring kinds, checked against the training references with no model; five preparation fixes (cash-on-delivery label, README patterns for monthly files, documented status columns, header aliases, yearly files of one series); the bundle left open that made every model-routed question abstain | `<<CODE>>` | Done; the public score is not known |
+| 11 Nov | [Fixed question kinds before the model](2026-11-11_intent_layer/README.md) | A deterministic layer for recurring kinds, checked against the training references with no model; five preparation fixes (cash-on-delivery label, README patterns for monthly files, documented status columns, header aliases, yearly files of one series); the bundle left open that made every model-routed question abstain | `9b8ad23` | Done; the public score is not known |
 | 10 Nov | [Cleanup of the retired path and outdated documents](2026-11-10_cleanup_plan/README.md) | The raw-file CodeAgent path, dead tests and outdated documents removed; `make bench`/`predict` and the CLI defaults use the measured settings; server settings in one file; answers unchanged (replay of five sets, live sample10) | `37ee7e9`, `a40c07d`, `a19da8b`, `b2657c4` | Done |
 
 ## Terms
@@ -139,6 +151,9 @@ Gathered on 10 November from the four records with plans. "Affects" gives the qu
 | B23 | Receipts and suppliers as a semantic relation (purchase total, main supplier by receipt count) | 49 open training; public rulebook adds the main supplier | Intent record 3.1 |
 | B24 | Public-rulebook kinds still without a query: average per weekday, main supplier, hardest-working staff, and the industry rules (mother-and-baby, repair shop, phone shop). Each needs a second independent computation and a hand-derived test | public only | Intent record 5 |
 | B25 | Publish a rulebook-ready relation for the phone-shop, repair-shop and mother-and-baby layouts, checked with `scripts/bundle-invariants.py` | 210 public | Intent record 5 |
+| B26 | Gross profit, cost and deliveries (`đợt giao`) as semantic relations | 13 + 14 open training | Intent record 3.3 |
+| B27 | Debt views for the partial bundles biz_106 and biz_109, whose raw data has payments but no published debt macros | about 25 open training | Intent record 3.3 |
+| B28 | Stock in bundles with no stock snapshot: 10 of 27 such training questions are `unanswerable`, 17 have a number, and no rule found separates them | 27 open training | Intent record 3.3 |
 
 ### Measurement and workflow
 
@@ -159,7 +174,7 @@ The additions are listed in order in [the workflow review](2026-11-10_workflow_g
 11. **Runs repeat only with all four conditions:** temperature 0, a fresh server per set, a worktree pinned at the commit, and one DuckDB thread. Compare runs question by question, not by totals. (Unseen 5.1, 5.3; rankings 3.1.)
 12. **Compare re-prepared bundles with the previous generation before measuring:** columns, rows, hashes, issues and schema text. (Unseen 5.5.) `scripts/compare-bundles.py` now does it, including the result of every table function; it showed that the cash-on-delivery fix changed one of 30 training businesses, and that the header aliases changed one (biz_124's stock names).
 13. **Run the whole measured path once, with nothing mocked, before trusting a new layer.** The first model run of the intent layer abstained on every question that reached the model, while all synthetic tests passed: two components held the same DuckDB file. (Intent record 2.9.)
-14. **A rule reader written from a set of questions says little about new questions.** The kinds claim 80.7% of the training questions they were written from and <<PUBLIC_PCT>>% of the public questions. Measure coverage on a split you did not write from, by counts only, and never widen the vocabulary from its text. (Intent record 3.2.)
+14. **A rule reader written from a set of questions says little about new questions.** The kinds claim 82.4% of the training questions they were written from and 17.9% of the public questions. Measure coverage on a split you did not write from, by counts only, and never widen the vocabulary from its text. (Intent record 3.2.)
 15. **Check a deterministic layer against the references before any model run**, and fix a wrong claim at its cause. The replay found the cash-on-delivery label in the bundle, not in the parser. (Intent record 2.8.)
 
 ## What each round's record should contain
